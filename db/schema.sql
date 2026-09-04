@@ -4,11 +4,12 @@
 -- the schema (the tables live in Supabase, not in a migrations framework).
 --
 -- ACCESS MODEL: tracked sites are anonymous and global — there is no login.
--- Every read and write goes through the Next.js server using the service-role
--- key; the browser never talks to Supabase directly. So RLS is enabled with
--- NO policies, which denies all anon/authenticated access outright while the
--- service role bypasses it. That is deliberately stricter than writing
--- permissive anon policies: it means a leaked publishable key grants nothing.
+-- Every read and write goes through the Next.js server using a secret key
+-- (sb_secret_..., or the legacy service_role JWT); the browser never talks to
+-- Supabase directly. So RLS is enabled with NO policies, which denies all
+-- anon/authenticated access outright while a BYPASSRLS key goes through. That
+-- is deliberately stricter than writing permissive anon policies: it means a
+-- leaked publishable key grants nothing at all.
 
 create extension if not exists "pgcrypto";
 
