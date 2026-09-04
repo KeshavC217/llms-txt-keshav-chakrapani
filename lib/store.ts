@@ -18,6 +18,7 @@ export interface TrackedSite {
   nextCheckAt: string;
   checkIntervalHours: number;
   useAi: boolean;
+  monitored: boolean;
   status: "active" | "paused";
   consecutiveFailures: number;
   lastError: string | null;
@@ -70,6 +71,7 @@ function toSite(row: any): TrackedSite {
     nextCheckAt: row.next_check_at,
     checkIntervalHours: row.check_interval_hours,
     useAi: row.use_ai,
+    monitored: row.monitored ?? false,
     status: row.status,
     consecutiveFailures: row.consecutive_failures,
     lastError: row.last_error,
@@ -97,7 +99,10 @@ function toSnapshot(row: any): Snapshot {
  * submitting the same site concurrently should both succeed rather than one
  * getting a constraint error.
  */
-export async function trackSite(url: string, options: { useAi?: boolean; intervalHours?: number } = {}): Promise<TrackedSite> {
+export async function upsertSite(
+  url: string,
+  options: { useAi?: boolean; intervalHours?: number; monitored?: boolean } = {}
+): Promise<TrackedSite> {
   const { data, error } = await client()
     .from("tracked_sites")
     .upsert(
@@ -105,14 +110,22 @@ export async function trackSite(url: string, options: { useAi?: boolean; interva
         url,
         use_ai: options.useAi ?? false,
         ...(options.intervalHours ? { check_interval_hours: options.intervalHours } : {}),
+        // Only ever raised, never lowered: a plain generate for a site someone
+        // already chose to monitor must not silently unmonitor it.
+        ...(options.monitored ? { monitored: true } : {}),
       },
       { onConflict: "url", ignoreDuplicates: false }
     )
     .select()
     .single();
 
-  if (error) throw new Error(`Could not track that site: ${error.message}`);
+  if (error) throw new Error(`Could not save that site: ${error.message}`);
   return toSite(data);
+}
+
+/** Starts monitoring a site (creating it if needed). */
+export function trackSite(url: string, options: { useAi?: boolean; intervalHours?: number } = {}): Promise<TrackedSite> {
+  return upsertSite(url, { ...options, monitored: true });
 }
 
 export async function getSiteByUrl(url: string): Promise<TrackedSite | null> {
@@ -121,10 +134,12 @@ export async function getSiteByUrl(url: string): Promise<TrackedSite | null> {
   return data ? toSite(data) : null;
 }
 
+/** Monitored sites only — the dashboard must not fill with one-off lookups. */
 export async function listSites(limit = 50): Promise<TrackedSite[]> {
   const { data, error } = await client()
     .from("tracked_sites")
     .select("*")
+    .eq("monitored", true)
     .order("created_at", { ascending: false })
     .limit(limit);
   if (error) throw new Error(error.message);
@@ -160,6 +175,7 @@ export async function dueSites(limit = 10): Promise<TrackedSite[]> {
     .from("tracked_sites")
     .select("*")
     .eq("status", "active")
+    .eq("monitored", true)
     .lte("next_check_at", new Date().toISOString())
     .order("next_check_at", { ascending: true })
     .limit(limit);
@@ -190,7 +206,9 @@ export async function recordGeneration(
   const hash = hashContent(llmsTxt);
   const previous = await latestSnapshot(site.id);
 
-  await markChecked(site);
+  // Only advance the schedule for sites the scheduler actually visits;
+  // a one-off generate should not look like a completed monitoring check.
+  if (site.monitored) await markChecked(site);
 
   if (previous?.contentHash === hash) {
     return { changed: false, snapshot: previous, diff: null };

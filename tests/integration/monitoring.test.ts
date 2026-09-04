@@ -23,6 +23,7 @@ const { POST: trackSitePost, DELETE: untrack } = await import("../../app/api/sit
 
 let server: FixtureServer;
 const trackedIds: string[] = [];
+const trackedUrls: string[] = [];
 /** Sites are stored under their normalized URL, so lookups must normalize too. */
 const storedUrl = () => normalizeUrl(server.url)!;
 
@@ -32,7 +33,15 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await server?.close();
-  if (isStoreConfigured()) for (const id of trackedIds) await deleteSite(id).catch(() => {});
+  if (!isStoreConfigured()) return;
+  // Clean up by URL as well as by collected id: tracking a deliberately dead
+  // host returns an error body with no site id, so an id-only cleanup leaves
+  // that row behind and the next run inherits it.
+  for (const id of trackedIds) await deleteSite(id).catch(() => {});
+  for (const url of trackedUrls) {
+    const site = await getSiteByUrl(url).catch(() => null);
+    if (site) await deleteSite(site.id).catch(() => {});
+  }
 });
 
 function req(url: string, init?: RequestInit) {
@@ -57,6 +66,7 @@ describe.runIf(isStoreConfigured())("monitoring end to end", () => {
     expect(tracked.status).toBe(200);
     const body = await tracked.json();
     trackedIds.push(body.site.id);
+    trackedUrls.push(body.site.url);
 
     expect(body.pageCount).toBeGreaterThan(3);
     expect(body.llmsTxt).toMatch(/^# /);
@@ -92,6 +102,7 @@ describe.runIf(isStoreConfigured())("monitoring end to end", () => {
 
   it("records a failure and backs the site off rather than retrying forever", async () => {
     const dead = "http://127.0.0.1:1/";
+    trackedUrls.push(dead);
     const tracked = await trackSitePost(
       req("http://localhost/api/sites", { method: "POST", body: JSON.stringify({ url: dead }) })
     );

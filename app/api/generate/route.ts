@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { generateLlmsTxt, normalizeUrl } from "@/lib/generate";
-import { getSiteByUrl, isStoreConfigured, latestSnapshot } from "@/lib/store";
+import { getSiteByUrl, isStoreConfigured, latestSnapshot, recordGeneration, upsertSite } from "@/lib/store";
 
 /**
  * Vercel terminates a Hobby function at 300s, but a crawl that takes minutes
@@ -75,6 +75,21 @@ export async function POST(request: Request) {
       REQUEST_BUDGET_MS,
       abort
     );
+
+    // Persist so the next request for this URL is served from storage rather
+    // than re-crawling someone else's site. Best-effort: a storage failure
+    // must not lose a document we already generated successfully.
+    if (isStoreConfigured()) {
+      try {
+        const site = await upsertSite(normalizedUrl, { useAi: Boolean(body.useAi) });
+        await recordGeneration(site, result.llmsTxt, {
+          pageCount: result.pageCount,
+          aiStatus: result.aiStatus,
+        });
+      } catch (err) {
+        console.error("[generate] could not persist result:", err);
+      }
+    }
 
     return NextResponse.json({
       llmsTxt: result.llmsTxt,

@@ -28,6 +28,12 @@ create table if not exists public.tracked_sites (
   next_check_at         timestamptz not null default now(),
   check_interval_hours  integer     not null default 24 check (check_interval_hours > 0),
   use_ai                boolean     not null default false,
+  -- Whether the scheduler should revisit this site. Every generation stores a
+  -- row so repeat requests are served from the database rather than
+  -- re-crawling a third party, but a one-off lookup must not enrol that site
+  -- in monitoring forever. Kept separate from `status`, which answers a
+  -- different question ("is this site healthy").
+  monitored             boolean     not null default false,
   -- active | paused. A site that fails repeatedly is paused rather than
   -- retried forever against a dead host.
   status                text        not null default 'active' check (status in ('active', 'paused')),
@@ -37,7 +43,7 @@ create table if not exists public.tracked_sites (
 
 create index if not exists tracked_sites_due_idx
   on public.tracked_sites (next_check_at)
-  where status = 'active';
+  where status = 'active' and monitored = true;
 
 -- ---------------------------------------------------------------------------
 -- snapshots: every generated version of a site's llms.txt.
