@@ -172,12 +172,15 @@ describe("provider misbehavior", () => {
 
 describe("request budget", () => {
   it("keeps the whole request inside one budget rather than two independent timeouts", async () => {
-    // Vercel Hobby kills a function at 60s. The crawl and the copyedit used to
-    // hold separate 60s and 65s timeouts, so a slow site could reach 125s and
-    // be killed by the platform — an opaque 504 with no body, losing both the
-    // error message and the deterministic document we were already holding.
+    // The crawl and the copyedit once held separate 60s and 65s timeouts, so
+    // a slow site could reach 125s against what was then a 60s platform
+    // ceiling — an opaque 504 with no body, losing both the error message and
+    // the deterministic document we were already holding. They now share one
+    // budget, which must sit inside the declared maxDuration.
     const { maxDuration } = await import("../../app/api/generate/route");
-    expect(maxDuration).toBeLessThanOrEqual(60);
+    // 300s is the platform ceiling on Vercel's cheapest plan; declaring more
+    // than the plan allows fails at deploy time, not at request time.
+    expect(maxDuration).toBeLessThanOrEqual(300);
 
     const started = Date.now();
     await generate();

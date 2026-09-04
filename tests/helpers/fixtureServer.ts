@@ -33,6 +33,8 @@ export interface FixtureServer {
   requestTimes: number[];
   /** How many times the throttling route answered 429. */
   throttleResponses: number;
+  /** Mutate a page's title, so a monitoring test can make the site genuinely change. */
+  setPageTitle(path: string, title: string): void;
 }
 
 function html(body: string, head = ""): string {
@@ -296,6 +298,10 @@ export async function startFixtureServer(options: FixtureOptions = {}): Promise<
 
   return {
     url: baseUrl(),
+    setPageTitle(path: string, title: string) {
+      const page = PAGES[path];
+      if (page) page.title = title;
+    },
     requests,
     requestTimes,
     get throttleResponses() {
