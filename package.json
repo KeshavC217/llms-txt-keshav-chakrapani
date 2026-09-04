@@ -15,6 +15,7 @@
     "test:all": "vitest run"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.115.0",
     "cheerio": "^1.2.0",
     "compromise": "^14.16.0",
     "natural": "^8.1.1",

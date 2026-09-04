@@ -16,6 +16,10 @@ import { startFixtureServer, type FixtureServer } from "../helpers/fixtureServer
 
 process.env.ALLOW_PRIVATE_CRAWL_TARGETS = "1";
 process.env.OPENROUTER_API_KEY = "test-key";
+// This suite exercises the AI pass, not crawl politeness — pacing every
+// fixture request would just make it slow. tests/integration/pipeline.test.ts
+// asserts the real interval.
+process.env.CRAWL_MIN_REQUEST_INTERVAL_MS = "0";
 
 let fake: FakeOpenRouter;
 let site: FixtureServer;
@@ -48,7 +52,7 @@ async function generate(useAi = true) {
 }
 
 describe("outbound request shape", () => {
-  it("fans the document out into parallel calls instead of one oversized one", async () => {
+  it("fans the document out into parallel calls instead of one oversized one", { timeout: 30_000 }, async () => {
     // A single call for a 90-page site emitted ~5,200 completion tokens, 65%
     // of the cap, and overflowing that cap silently discarded the whole pass.
     // Chunking is what keeps each call's output small enough that it can't.

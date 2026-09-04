@@ -141,6 +141,34 @@ describe("end-to-end crawl of a fixture site", () => {
   });
 });
 
+describe("crawl politeness", () => {
+  it("waits and retries when the host answers 429, instead of dropping the page", () => {
+    // A 429 means "too fast", not "this page is broken" — dropping it loses a
+    // page the site was perfectly willing to serve a moment later.
+    expect(server.throttleResponses, "the fixture should have throttled us").toBeGreaterThan(0);
+    expect(urls(), "the throttled page should still make it into the output").toContain("/rate-limited");
+
+    const page = result.pages.find((p) => p.url.endsWith("/rate-limited"));
+    expect(page?.title).toBe("Popular Page - Acme");
+  });
+
+  it("paces requests instead of firing every worker at once", () => {
+    // Bounded concurrency alone is not politeness: 8 workers against one host
+    // is 8 simultaneous requests sustained for the whole crawl, which is how
+    // a crawler earns a wall of 429s and gets blocked.
+    const times = [...server.requestTimes].sort((a, b) => a - b);
+    expect(times.length).toBeGreaterThan(10);
+
+    // No more than a handful may land in any 100ms window.
+    let worstBurst = 0;
+    for (let i = 0; i < times.length; i++) {
+      const inWindow = times.filter((t) => t >= times[i] && t < times[i] + 100).length;
+      worstBurst = Math.max(worstBurst, inWindow);
+    }
+    expect(worstBurst, `${worstBurst} requests landed within one 100ms window`).toBeLessThanOrEqual(8);
+  });
+});
+
 describe("redirects", () => {
   it("crawls the host it landed on, not the one that was typed", async () => {
     // pinecone.io redirects to www.pinecone.io. Keeping the typed origin made

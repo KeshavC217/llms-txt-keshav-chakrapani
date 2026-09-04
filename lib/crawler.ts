@@ -3,6 +3,7 @@ import { extractNavCategories } from "./nav";
 import { clientRenderSignal, isImprovedContent, launchBrowser, renderPage } from "./browserRender";
 import { EMPTY_ROBOTS, isAllowedByRobots, parseRobotsTxt, type RobotsRules } from "./robots";
 import { assertPublicUrl } from "./urlGuard";
+import { HostRateLimiter, RateLimiterRegistry, parseRetryAfter } from "./rateLimit";
 import type { CrawlResult, PageInfo } from "./types";
 
 // Page budget. The old value of 20 was a recall ceiling, not a natural limit:
@@ -58,12 +59,23 @@ interface FetchResult {
   nonHtml?: boolean;
   /** Where the request actually landed after redirects. */
   finalUrl?: string;
+  /** The host asked us to slow down (429/503) — worth retrying, unlike a 404. */
+  throttled?: boolean;
 }
 
 export interface CrawlOptions {
   /** Aborts in-flight work and stops escalating to the browser (e.g. the request's overall timeout fired). */
   signal?: AbortSignal;
 }
+
+/**
+ * Statuses that mean "you are going too fast", as opposed to "this page is
+ * broken". Seeing one is a signal to slow the whole crawl down, and to retry
+ * the request rather than dropping the page.
+ */
+const THROTTLE_STATUSES = new Set([429, 503]);
+/** How many times one request will wait-and-retry after a throttle response. */
+const THROTTLE_RETRIES = 2;
 
 /**
  * Collapses entries that are the same page reached by different URLs.
@@ -128,7 +140,28 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
   return results;
 }
 
-async function fetchHtmlDetailed(url: string, signal?: AbortSignal, timeoutMs = FETCH_TIMEOUT_MS): Promise<FetchResult> {
+async function fetchHtmlDetailed(
+  url: string,
+  signal?: AbortSignal,
+  limiter?: HostRateLimiter,
+  timeoutMs = FETCH_TIMEOUT_MS
+): Promise<FetchResult> {
+  for (let attempt = 0; ; attempt++) {
+    const result = await fetchHtmlOnce(url, signal, limiter, timeoutMs);
+    if (!result.throttled || attempt >= THROTTLE_RETRIES || signal?.aborted) return result;
+    // The limiter has already widened its interval and pushed the next slot
+    // out past Retry-After, so simply asking for another slot is the wait.
+  }
+}
+
+async function fetchHtmlOnce(
+  url: string,
+  signal?: AbortSignal,
+  limiter?: HostRateLimiter,
+  timeoutMs = FETCH_TIMEOUT_MS
+): Promise<FetchResult> {
+  if (limiter) await limiter.acquire(signal);
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const onOuterAbort = () => controller.abort();
@@ -148,6 +181,13 @@ async function fetchHtmlDetailed(url: string, signal?: AbortSignal, timeoutMs = 
 
     const finalUrl = res.url || url;
 
+    if (THROTTLE_STATUSES.has(res.status)) {
+      // Back the whole host off, not just this request: the other workers are
+      // still running at the old rate and will earn the same response.
+      limiter?.noteThrottled(parseRetryAfter(res.headers.get("retry-after")));
+      return { html: null, status: res.status, finalUrl, throttled: true };
+    }
+
     if (!res.ok) {
       return { html: null, status: res.status, finalUrl };
     }
@@ -166,7 +206,14 @@ async function fetchHtmlDetailed(url: string, signal?: AbortSignal, timeoutMs = 
   }
 }
 
-async function fetchText(url: string, signal?: AbortSignal, timeoutMs = FETCH_TIMEOUT_MS): Promise<string | null> {
+async function fetchText(
+  url: string,
+  signal?: AbortSignal,
+  limiter?: HostRateLimiter,
+  timeoutMs = FETCH_TIMEOUT_MS
+): Promise<string | null> {
+  if (limiter) await limiter.acquire(signal);
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const onOuterAbort = () => controller.abort();
@@ -198,9 +245,9 @@ export function isCrawlableLink(url: string, robots: RobotsRules = EMPTY_ROBOTS)
   return isAllowedByRobots(robots, `${parsed.pathname}${parsed.search}`);
 }
 
-async function fetchRobots(rootUrl: string, signal?: AbortSignal): Promise<RobotsRules> {
+async function fetchRobots(rootUrl: string, signal?: AbortSignal, limiter?: HostRateLimiter): Promise<RobotsRules> {
   try {
-    const text = await fetchText(new URL("/robots.txt", rootUrl).toString(), signal);
+    const text = await fetchText(new URL("/robots.txt", rootUrl).toString(), signal, limiter);
     return text ? parseRobotsTxt(text, USER_AGENT_TOKEN) : EMPTY_ROBOTS;
   } catch {
     return EMPTY_ROBOTS;
@@ -219,7 +266,12 @@ async function fetchRobots(rootUrl: string, signal?: AbortSignal): Promise<Robot
  * A `<sitemapindex>` is followed one level deep (up to MAX_NESTED_SITEMAPS
  * children) so the common "index of per-section sitemaps" layout works.
  */
-async function discoverSitemapUrls(rootUrl: string, robots: RobotsRules, signal?: AbortSignal): Promise<string[]> {
+async function discoverSitemapUrls(
+  rootUrl: string,
+  robots: RobotsRules,
+  signal?: AbortSignal,
+  limiter?: HostRateLimiter
+): Promise<string[]> {
   const origin = new URL(rootUrl).origin;
   const candidates = [
     ...robots.sitemaps.filter((s) => {
@@ -239,7 +291,7 @@ async function discoverSitemapUrls(rootUrl: string, robots: RobotsRules, signal?
 
   while (queue.length > 0 && found.length < MAX_SITEMAP_URLS) {
     const sitemapUrl = queue.shift()!;
-    const xml = await fetchText(sitemapUrl, signal);
+    const xml = await fetchText(sitemapUrl, signal, limiter);
     if (!xml) continue;
 
     const locs = Array.from(xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)).map((m) => m[1]);
@@ -320,6 +372,12 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
   const { signal } = options;
   await assertPublicUrl(rootUrl);
 
+  // One limiter per host. Every request in a crawl points at the same host, so
+  // this is what keeps 8 concurrent workers from behaving like 8 simultaneous
+  // clients for the length of a 100-page crawl.
+  const limiters = new RateLimiterRegistry();
+  const limiterFor = (url: string) => limiters.for(url);
+
   const browserRef: { current: Promise<import("playwright").Browser | null> | null } = { current: null };
   const getBrowser = () => {
     if (!browserRef.current) browserRef.current = launchBrowser();
@@ -361,7 +419,7 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
 
   /** Fetches a page via plain HTTP, falling back to Playwright if the fetch fails outright or the content looks thin. */
   async function fetchWithRenderFallback(url: string): Promise<string | null> {
-    const result = await fetchHtmlDetailed(url, signal);
+    const result = await fetchHtmlDetailed(url, signal, limiterFor(url));
     if (result.html) return withRenderFallback(url, result.html);
     // A clean non-HTML response (a PDF served from a link we couldn't filter
     // on extension) isn't a bot wall — rendering it would just waste ~15s.
@@ -370,7 +428,7 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
   }
 
   try {
-    const homepage = await fetchHtmlDetailed(rootUrl, signal);
+    const homepage = await fetchHtmlDetailed(rootUrl, signal, limiterFor(rootUrl));
 
     /**
      * Crawl the host we actually landed on, not the one that was typed.
@@ -382,7 +440,7 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
      * that is itself a redirect, making an LLM take an extra hop per link.
      */
     const effectiveRoot = homepage.finalUrl ?? rootUrl;
-    const robots = await fetchRobots(effectiveRoot, signal);
+    const robots = await fetchRobots(effectiveRoot, signal, limiterFor(effectiveRoot));
 
     const homepageHtml = homepage.html
       ? await withRenderFallback(effectiveRoot, homepage.html)
@@ -402,7 +460,7 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
     const homepageLinks = extractInternalLinks(homepageHtml, effectiveRoot).filter(
       (link) => link.replace(/\/$/, "") !== rootNormalized && isCrawlableLink(link, robots)
     );
-    const sitemapLinks = (await discoverSitemapUrls(effectiveRoot, robots, signal)).filter(
+    const sitemapLinks = (await discoverSitemapUrls(effectiveRoot, robots, signal, limiterFor(effectiveRoot))).filter(
       (link) => link.replace(/\/$/, "") !== rootNormalized
     );
 

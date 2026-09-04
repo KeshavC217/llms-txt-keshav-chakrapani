@@ -29,6 +29,10 @@ export interface FixtureServer {
   close(): Promise<void>;
   /** Every path requested so far, in order — lets a test assert what we did and didn't fetch. */
   requests: string[];
+  /** Arrival time of each request, so a test can assert pacing rather than just count. */
+  requestTimes: number[];
+  /** How many times the throttling route answered 429. */
+  throttleResponses: number;
 }
 
 function html(body: string, head = ""): string {
@@ -100,10 +104,17 @@ const SITEMAP_PATHS = [
 
 export async function startFixtureServer(options: FixtureOptions = {}): Promise<FixtureServer> {
   const requests: string[] = [];
+  const requestTimes: number[] = [];
+  // The rate-limited route answers 429 twice before serving, so a test can
+  // prove the crawler waits and retries instead of dropping the page.
+  const THROTTLE_TIMES = 2;
+  let throttleHits = 0;
+  let throttleResponses = 0;
 
   const server: Server = createServer((req, res) => {
     const path = (req.url ?? "/").split("?")[0];
     requests.push(path);
+    requestTimes.push(Date.now());
 
     const send = (status: number, contentType: string, body: string) => {
       res.writeHead(status, { "Content-Type": contentType });
@@ -123,6 +134,7 @@ export async function startFixtureServer(options: FixtureOptions = {}): Promise<
              <a href="/integrations">Integrations</a>
              <a href="/integrations.htm">Integrations (legacy URL)</a>
              <a href="/security">Security</a>
+             <a href="/rate-limited">Popular Page</a>
              <a href="/pricing-guide">Pricing Guide</a>
              <a href="/docs/api_(legacy)">Legacy API</a>
              <a href="/careers">Careers</a>
@@ -143,6 +155,20 @@ export async function startFixtureServer(options: FixtureOptions = {}): Promise<
     if (path === "/start-here") {
       res.writeHead(301, { Location: baseUrl() + "/" });
       return res.end();
+    }
+
+    // Answers 429 with Retry-After the first few times, then serves normally.
+    if (path === "/rate-limited") {
+      if (throttleHits++ < THROTTLE_TIMES) {
+        throttleResponses++;
+        res.writeHead(429, { "Content-Type": "text/html", "Retry-After": "1" });
+        return res.end("slow down");
+      }
+      return send(
+        200,
+        "text/html; charset=utf-8",
+        html("<main><h1>Rate Limited Page</h1></main>", `<title>Popular Page - Acme</title><meta name="description" content="The page everyone asks for at once.">`)
+      );
     }
 
     if (path === "/robots.txt") {
@@ -271,6 +297,10 @@ export async function startFixtureServer(options: FixtureOptions = {}): Promise<
   return {
     url: baseUrl(),
     requests,
+    requestTimes,
+    get throttleResponses() {
+      return throttleResponses;
+    },
     close: () => new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
   };
 }

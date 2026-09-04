@@ -228,6 +228,12 @@ liveness and recall are checkable facts, so they gate; the judge informs.
   can't read an internal response body, which is the part that leaks; fully closing it needs
   pinned-IP dialing.
 - No persistence, no automated re-crawling/change detection.
+- Requests to a host are paced (`CRAWL_MIN_REQUEST_INTERVAL_MS`, default 120ms) and back off
+  automatically on 429/503, honouring `Retry-After`. The backoff is permanent for the rest of the
+  crawl rather than per-request: a server that just said "too fast" will say it again if the other
+  in-flight workers keep the old rate. This costs real time — beeclue.com goes from ~9s to ~16s —
+  and it is worth it, since bounded concurrency alone still means 8 simultaneous requests to one
+  host sustained across a hundred pages.
 - Crawl is capped at 100 pages per site (`MAX_CRAWL_PAGES`) at concurrency 8
   (`MAX_CRAWL_CONCURRENCY`), with a 60s overall timeout. Measured against beeclue.com, whose own
   published `llms.txt` lists 91 URLs: a 20-page cap gave 20% URL recall in 2.1s, 100 pages gives
