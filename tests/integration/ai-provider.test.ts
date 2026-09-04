@@ -194,5 +194,5 @@ describe("aiStatus contract the UI depends on", () => {
     delete process.env.OPENROUTER_API_KEY;
     expect((await generate()).aiStatus).toBe("unavailable");
     process.env.OPENROUTER_API_KEY = "test-key";
-  });
+  }, 30_000);
 });

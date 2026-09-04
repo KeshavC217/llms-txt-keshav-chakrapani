@@ -129,7 +129,7 @@ export async function startFixtureServer(options: FixtureOptions = {}): Promise<
              <a href="/legacy-pricing">Pricing (old link)</a>
              <a href="/blog/post-one">Shipping Widgets Faster</a>
              <a href="/whitepaper.pdf">Whitepaper (PDF)</a>
-             ${options.includeRenderPages ? '<a href="/spa">Dashboard</a><a href="/walled">Changelog</a>' : ""}
+             ${options.includeRenderPages ? '<a href="/spa">Dashboard</a><a href="/walled">Changelog</a><a href="/dashboard">Analytics</a>' : ""}
              <a href="https://external.example.com/partner">A partner</a>
              <a href="mailto:hi@acme.test">Email us</a>
            </main>`,
@@ -177,6 +177,40 @@ export async function startFixtureServer(options: FixtureOptions = {}): Promise<
                "<main><h1>Dashboard</h1><p>Watch every widget run in real time, with per-stage timings and a live event feed for each pipeline.</p></main>";
            </script>`,
           `<title>Loading…</title>`
+        )
+      );
+    }
+
+    // The realistic JS-app case, and the one the thin-content heuristic
+    // misses: the shell is NOT empty — it ships a nav, a footer and a cookie
+    // banner, comfortably over the 200-character threshold — but every word
+    // of actual content arrives from JS *after* load, the way a React app
+    // that fetches on mount behaves. A crawler that only escalates on an
+    // empty shell sees the chrome, decides the page is fine, and indexes a
+    // generic title with no description.
+    if (path === "/dashboard") {
+      return send(
+        200,
+        "text/html; charset=utf-8",
+        html(
+          `<nav><a href="/">Home</a><a href="/docs">Documentation</a><a href="/pricing">Pricing</a>
+             <a href="/about">About us</a><a href="/security">Security</a></nav>
+           <div id="root"></div>
+           <footer>Acme Inc. All rights reserved. Terms of service, privacy policy, cookie
+             settings, and our accessibility statement are available in the footer navigation.
+             This site uses cookies to improve your experience.</footer>
+           <script>
+             setTimeout(function () {
+               document.title = "Analytics Dashboard - Acme";
+               var m = document.createElement("meta");
+               m.name = "description";
+               m.content = "Track widget throughput, error rates and per-stage latency in real time.";
+               document.head.appendChild(m);
+               document.getElementById("root").innerHTML =
+                 "<main><h1>Analytics Dashboard</h1><p>Track widget throughput, error rates and per-stage latency across every pipeline you run.</p></main>";
+             }, 250);
+           </script>`,
+          `<title>Acme</title>`
         )
       );
     }

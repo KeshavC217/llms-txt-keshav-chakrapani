@@ -68,6 +68,18 @@ describe.runIf(browserAvailable)("browser render fallback", () => {
     expect(walled!.title).toBe("Changelog - Acme");
   });
 
+  it("recovers a JS app whose shell already has more text than the thin-content bar", () => {
+    // The thin-content heuristic only escalates on a nearly-empty shell, but
+    // real JS apps ship a nav and a footer and then fetch their content on
+    // mount. Those pages sail past the threshold and get indexed with a
+    // generic title and no description, which is silently wrong rather than
+    // visibly broken.
+    const dash = result.pages.find((p) => p.url.endsWith("/dashboard"));
+    expect(dash, "the /dashboard page was dropped entirely").toBeTruthy();
+    expect(dash!.title).toBe("Analytics Dashboard - Acme");
+    expect(dash!.description).toContain("Track widget throughput");
+  });
+
   it("never publishes a loading-placeholder title", () => {
     expect(llmsTxt).not.toMatch(/Loading|Just a moment/i);
   });

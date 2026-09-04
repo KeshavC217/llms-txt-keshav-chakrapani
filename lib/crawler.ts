@@ -1,6 +1,6 @@
 import { extractInternalLinks, extractMetadata, isPlaceholderTitle } from "./extract";
 import { extractNavCategories } from "./nav";
-import { isImprovedContent, isThinContent, launchBrowser, renderPage } from "./browserRender";
+import { clientRenderSignal, isImprovedContent, launchBrowser, renderPage } from "./browserRender";
 import { EMPTY_ROBOTS, isAllowedByRobots, parseRobotsTxt, type RobotsRules } from "./robots";
 import { assertPublicUrl } from "./urlGuard";
 import type { CrawlResult, PageInfo } from "./types";
@@ -18,6 +18,24 @@ const MAX_PAGES = Number(process.env.MAX_CRAWL_PAGES ?? 100);
 // hammering a small site — this is a one-off, user-initiated crawl, not a
 // continuous spider.
 const MAX_CONCURRENCY = Number(process.env.MAX_CRAWL_CONCURRENCY ?? 8);
+/**
+ * Ceiling on browser renders per crawl. Broadening the escalation signal to
+ * cover real JS apps means a fully client-rendered site would otherwise try
+ * to render all MAX_PAGES pages — at a few seconds each that blows any
+ * request budget. Pages past the cap still get their fetched HTML, so the
+ * result degrades in coverage rather than failing.
+ */
+const MAX_RENDERS = Number(process.env.MAX_CRAWL_RENDERS ?? 30);
+/**
+ * Give up escalating after this many renders in a row recover nothing.
+ *
+ * The client-rendered signal is intentionally broad, so on a server-rendered
+ * site it produces false positives — and paying a few seconds per page for a
+ * render that changes nothing turned a 3s crawl into an 11s one. A site is
+ * either client-rendered or it isn't, so a handful of fruitless renders is
+ * strong evidence the rest will be fruitless too.
+ */
+const WASTED_RENDER_LIMIT = 3;
 const MAX_SITEMAP_URLS = 200;
 const MAX_NESTED_SITEMAPS = 3;
 const FETCH_TIMEOUT_MS = 6000;
@@ -304,18 +322,37 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
     return browserRef.current;
   };
 
-  /** Renders a page with Playwright, or null if the browser isn't available or we're out of time. */
+  let rendersUsed = 0;
+  let wastedRenders = 0;
+
+  /** Renders a page with Playwright, or null if unavailable, out of time, or out of render budget. */
   async function render(url: string): Promise<string | null> {
     if (signal?.aborted) return null;
+    if (rendersUsed >= MAX_RENDERS) return null;
+    rendersUsed++;
     const browser = await getBrowser();
     return browser ? renderPage(browser, url) : null;
   }
 
-  /** If fetched content looks like an empty SPA shell, retry with Playwright and keep whichever has more text. */
+  /** If fetched content looks client-rendered, retry with Playwright and keep whichever has more text. */
   async function withRenderFallback(url: string, html: string): Promise<string> {
-    if (!isThinContent(html)) return html;
+    const signal = clientRenderSignal(html);
+    if (signal === null) return html;
+    // Only the noisy "short page" signal is rate-limited by wasted work. An
+    // empty framework mount point is near-certain evidence, and starving it
+    // because a few brief server-rendered pages rendered for nothing is how
+    // the real JS pages end up indexed with a placeholder title.
+    if (signal === "weak" && wastedRenders >= WASTED_RENDER_LIMIT) return html;
+
     const rendered = await render(url);
-    return rendered && isImprovedContent(rendered, html) ? rendered : html;
+    if (rendered && isImprovedContent(rendered, html)) {
+      wastedRenders = 0;
+      return rendered;
+    }
+    // Only count a render that actually ran; an unavailable browser or an
+    // exhausted budget says nothing about whether the site is client-rendered.
+    if (rendered !== null && signal === "weak") wastedRenders++;
+    return html;
   }
 
   /** Fetches a page via plain HTTP, falling back to Playwright if the fetch fails outright or the content looks thin. */
