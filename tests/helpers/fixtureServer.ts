@@ -138,6 +138,13 @@ export async function startFixtureServer(options: FixtureOptions = {}): Promise<
       );
     }
 
+    // Apex-to-www style redirect: entering here must end up crawling "/",
+    // and every emitted URL must be post-redirect.
+    if (path === "/start-here") {
+      res.writeHead(301, { Location: baseUrl() + "/" });
+      return res.end();
+    }
+
     if (path === "/robots.txt") {
       return send(
         200,

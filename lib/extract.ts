@@ -39,10 +39,16 @@ export function extractMetadata(html: string, fallbackUrl: string): ExtractedMet
     clean(h1.length ? textWithSpacing($, h1.get(0)!) : "") ||
     fallbackUrl;
 
-  const description =
+  // Capped for every source, not just the prose fallback. Sites routinely ship
+  // 800-character meta descriptions (resy.com puts a restaurant's full blurb
+  // in one), which the spec's "- [name](url): notes" line is not for — an
+  // uncapped description turns the file into prose and crowds out the links.
+  const description = truncate(
     clean($('meta[name="description"]').attr("content")) ||
-    clean($('meta[property="og:description"]').attr("content")) ||
-    extractFallbackDescription($);
+      clean($('meta[property="og:description"]').attr("content")) ||
+      extractFallbackDescription($),
+    MAX_DESCRIPTION_LENGTH
+  );
 
   return { title, description: description || undefined, canonicalUrl: extractCanonicalUrl($, fallbackUrl) };
 }

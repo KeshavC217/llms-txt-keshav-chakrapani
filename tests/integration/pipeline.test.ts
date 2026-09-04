@@ -49,7 +49,7 @@ describe("end-to-end crawl of a fixture site", () => {
   });
 
   it("includes the homepage and its nav-linked pages", () => {
-    expect(urls()).toContain("");
+    expect(urls()).toContain("/");
     expect(urls()).toEqual(expect.arrayContaining(["/docs/getting-started", "/docs/config", "/pricing"]));
   });
 
@@ -139,6 +139,20 @@ describe("end-to-end crawl of a fixture site", () => {
     // sequences as substitution patterns and corrupt the line.
     expect(llmsTxt).toContain("starts at $0");
   });
+});
+
+describe("redirects", () => {
+  it("crawls the host it landed on, not the one that was typed", async () => {
+    // pinecone.io redirects to www.pinecone.io. Keeping the typed origin made
+    // every link on the fetched page fail the same-origin check, so the crawl
+    // collapsed to whatever happened to be relative-linked — and every URL we
+    // published was itself a redirect, costing a reader an extra hop per link.
+    const viaRedirect = await crawlSite(`${server.url}/start-here`);
+
+    expect(viaRedirect.rootUrl.replace(/\/$/, "")).toBe(server.url);
+    expect(viaRedirect.pages.length, "a redirected entry point should crawl the whole site").toBeGreaterThan(5);
+    expect(viaRedirect.pages.map((p) => p.url)).not.toContain(`${server.url}/start-here`);
+  }, 60_000);
 });
 
 describe("crawl failure handling", () => {

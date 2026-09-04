@@ -56,6 +56,8 @@ interface FetchResult {
   status?: number;
   /** True when the server answered fine but with something that isn't HTML (a PDF, an image). */
   nonHtml?: boolean;
+  /** Where the request actually landed after redirects. */
+  finalUrl?: string;
 }
 
 export interface CrawlOptions {
@@ -144,16 +146,18 @@ async function fetchHtmlDetailed(url: string, signal?: AbortSignal, timeoutMs = 
     // Re-check before reading the body, which is the part that would leak.
     await assertPublicUrl(res.url || url);
 
+    const finalUrl = res.url || url;
+
     if (!res.ok) {
-      return { html: null, status: res.status };
+      return { html: null, status: res.status, finalUrl };
     }
 
     const contentType = res.headers.get("content-type") ?? "";
     if (!contentType.includes("text/html") && !contentType.includes("application/xhtml")) {
-      return { html: null, status: res.status, nonHtml: true };
+      return { html: null, status: res.status, nonHtml: true, finalUrl };
     }
 
-    return { html: await res.text(), status: res.status };
+    return { html: await res.text(), status: res.status, finalUrl };
   } catch {
     return { html: null };
   } finally {
@@ -366,10 +370,23 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
   }
 
   try {
-    const robots = await fetchRobots(rootUrl, signal);
-
     const homepage = await fetchHtmlDetailed(rootUrl, signal);
-    const homepageHtml = homepage.html ? await withRenderFallback(rootUrl, homepage.html) : await render(rootUrl);
+
+    /**
+     * Crawl the host we actually landed on, not the one that was typed.
+     *
+     * "pinecone.io" redirects to "www.pinecone.io". Keeping the typed origin
+     * meant every link on the fetched page — all pointing at www — failed the
+     * same-origin check and was discarded, so the crawl collapsed to whatever
+     * happened to be relative-linked. It also published a URL for every page
+     * that is itself a redirect, making an LLM take an extra hop per link.
+     */
+    const effectiveRoot = homepage.finalUrl ?? rootUrl;
+    const robots = await fetchRobots(effectiveRoot, signal);
+
+    const homepageHtml = homepage.html
+      ? await withRenderFallback(effectiveRoot, homepage.html)
+      : await render(effectiveRoot);
 
     if (!homepageHtml) {
       if (homepage.status) {
@@ -378,14 +395,14 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
       throw new Error("Could not reach that site (no HTML response).");
     }
 
-    const homepageMeta = extractMetadata(homepageHtml, rootUrl);
-    const navCategories = extractNavCategories(homepageHtml, rootUrl);
-    const rootNormalized = rootUrl.replace(/\/$/, "");
+    const homepageMeta = extractMetadata(homepageHtml, effectiveRoot);
+    const navCategories = extractNavCategories(homepageHtml, effectiveRoot);
+    const rootNormalized = effectiveRoot.replace(/\/$/, "");
 
-    const homepageLinks = extractInternalLinks(homepageHtml, rootUrl).filter(
+    const homepageLinks = extractInternalLinks(homepageHtml, effectiveRoot).filter(
       (link) => link.replace(/\/$/, "") !== rootNormalized && isCrawlableLink(link, robots)
     );
-    const sitemapLinks = (await discoverSitemapUrls(rootUrl, robots, signal)).filter(
+    const sitemapLinks = (await discoverSitemapUrls(effectiveRoot, robots, signal)).filter(
       (link) => link.replace(/\/$/, "") !== rootNormalized
     );
 
@@ -420,12 +437,12 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
     );
 
     const pages = dedupePages([
-      { url: rootUrl, title: homepageMeta.title, description: homepageMeta.description },
+      { url: effectiveRoot, title: homepageMeta.title, description: homepageMeta.description },
       ...fetchedPages.filter((p): p is PageInfo => p !== null),
     ]);
 
     return {
-      rootUrl,
+      rootUrl: effectiveRoot,
       siteTitle: homepageMeta.title,
       siteDescription: homepageMeta.description,
       pages,
