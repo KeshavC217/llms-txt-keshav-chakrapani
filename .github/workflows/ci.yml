@@ -28,6 +28,13 @@ jobs:
       - name: Install Chromium for Playwright
         run: npx playwright install --with-deps chromium
 
+      # Next generates route/layout types (LayoutProps, PageProps) into
+      # .next/types. Those do not exist in a fresh checkout, so tsc must run
+      # after typegen or it fails on types the framework owns. Cheaper than a
+      # full build, and keeps typecheck ahead of the slower steps.
+      - name: Generate Next route types
+        run: npx next typegen
+
       - name: Typecheck
         run: npx tsc --noEmit
 

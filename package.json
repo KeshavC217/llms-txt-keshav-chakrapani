@@ -12,7 +12,8 @@
     "test:integration": "vitest run tests/integration",
     "test:eval": "vitest run tests/eval/corpus.test.ts",
     "test:eval:site": "vitest run tests/eval/single-site.test.ts",
-    "test:all": "vitest run"
+    "test:all": "vitest run",
+    "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.115.0",
