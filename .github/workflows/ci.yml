@@ -1,0 +1,55 @@
+# CI gate. Runs on every push and PR, and must pass before a deploy is
+# considered good — the reviewer feedback specifically called out CI that runs
+# on PRs but does not actually gate anything.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The browser is required: the render fallback is what makes
+      # JS-rendered sites work, and a suite that silently skips those tests
+      # would report green while that capability is broken.
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit and integration tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # Deploys only run when `verify` passed. Without needs:, a deploy job runs
+  # in parallel with the tests and ships whatever CI was about to reject.
+  deploy:
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment gate
+        run: |
+          echo "CI passed on main."
+          echo "Vercel's Git integration deploys from this commit."
+          echo "To make the gate binding, disable Vercel's automatic deploys and"
+          echo "run 'vercel deploy --prod' here with a VERCEL_TOKEN secret."

@@ -1,0 +1,61 @@
+# Scheduled monitoring: re-crawls tracked sites whose next check is due.
+#
+# GitHub Actions rather than Vercel Cron because Vercel's Hobby plan caps cron
+# at once per day with ±59 minutes of jitter, which is too coarse to be a
+# useful monitor or to demonstrate. Actions gives finer cadence for free, and
+# keeps the scheduler independent of the host — /api/refresh is a plain
+# authenticated endpoint, so moving to Vercel Cron later is a change of caller,
+# not of code.
+name: Monitor tracked sites
+
+on:
+  schedule:
+    # Hourly. The endpoint itself only acts on sites whose next_check_at is
+    # due, so the cadence here is an upper bound on responsiveness, not on
+    # how often any individual site gets crawled.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+# Never let two runs overlap: both would claim the same due sites and crawl
+# them twice.
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger refresh
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_URL:-}" ] || [ -z "${CRON_SECRET:-}" ]; then
+            echo "APP_URL and CRON_SECRET repository secrets are required." >&2
+            exit 1
+          fi
+
+          # --fail-with-body so a non-2xx fails the job but still shows the
+          # server's explanation, which is the thing worth reading.
+          response=$(curl --silent --show-error --fail-with-body \
+            --max-time 300 \
+            --header "Authorization: Bearer ${CRON_SECRET}" \
+            --request POST \
+            "${APP_URL%/}/api/refresh")
+
+          echo "$response" | python3 -m json.tool
+          # Surface a per-site failure in the job summary rather than burying
+          # it in logs — a run where every site failed still exits 0 otherwise.
+          echo "$response" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+results = data.get('results', [])
+failed = [r for r in results if r.get('status') == 'failed']
+print(f\"### Monitoring run\n\nChecked {data.get('checked', 0)} site(s), {len(failed)} failed.\n\")
+for r in results:
+    line = r.get('changeSummary') or r.get('error') or 'no changes'
+    print(f\"- \`{r['url']}\` — {r['status']}: {line}\")
+" >> "$GITHUB_STEP_SUMMARY"
