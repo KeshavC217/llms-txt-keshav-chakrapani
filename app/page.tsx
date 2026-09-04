@@ -3,7 +3,7 @@
 import { useState, type FormEvent } from "react";
 
 type Status = "idle" | "loading" | "success" | "error";
-type AiStatus = "off" | "unavailable" | "applied" | "no-changes" | "failed";
+type AiStatus = "off" | "unavailable" | "applied" | "no-changes" | "failed" | "skipped";
 
 /**
  * What to tell the user about the AI pass. "failed" and "unavailable" get a
@@ -18,6 +18,7 @@ const AI_NOTICE: Record<AiStatus, { text: string; warn: boolean } | null> = {
   "no-changes": { text: "AI reviewed it and found nothing to change", warn: false },
   failed: { text: "AI polish failed — showing the un-polished version", warn: true },
   unavailable: { text: "AI polish unavailable — set OPENROUTER_API_KEY", warn: true },
+  skipped: { text: "AI polish skipped — the crawl used the time budget", warn: true },
 };
 
 export default function Home() {

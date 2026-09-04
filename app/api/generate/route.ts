@@ -4,14 +4,28 @@ import { buildLlmsTxt } from "@/lib/buildLlmsTxt";
 import { enhanceLlmsTxt, isAiConfigured } from "@/lib/ai";
 import { formatIssues, validateLlmsTxt } from "@/lib/validate";
 
-// Generous enough to cover the homepage's mandatory browser render plus a
-// render fallback on several thin/SPA pages (15s each, see
-// lib/browserRender.ts) without timing out a site that happens to need it;
-// sites that don't need rendering finish in a couple seconds regardless.
-const OVERALL_TIMEOUT_MS = 60000;
-// Must comfortably exceed lib/openrouter.ts's own request timeout, or this
-// race cuts the model off before its own deadline and we lose the reply.
-const AI_TIMEOUT_MS = 65000;
+/**
+ * Vercel terminates a Hobby function at 60s. Everything this handler does must
+ * therefore fit inside ONE budget, not two independent ones — the crawl and
+ * the copyedit used to have separate 60s and 65s timeouts, so a slow site
+ * could reach 125s and get killed by the platform. That failure is the worst
+ * possible one: an opaque 504 with no body, so the user sees neither an error
+ * message nor the perfectly good deterministic document we were holding.
+ *
+ * 55s leaves headroom under maxDuration for response serialization.
+ */
+const REQUEST_BUDGET_MS = 55_000;
+
+/**
+ * Don't start the copyedit pass with less than this left. It measures ~3s, so
+ * this is generous — but a pass that gets cut off mid-flight wastes tokens and
+ * returns nothing, whereas skipping it returns the deterministic document with
+ * an honest reason.
+ */
+const MIN_AI_BUDGET_MS = 10_000;
+
+/** Kept in reserve so we always have time to serialize and send the response. */
+const RESPONSE_RESERVE_MS = 3_000;
 
 // Errors from lib/urlGuard.ts and the URL parser are the user's input being
 // wrong, not the upstream site being down — they deserve a 400, not a 502.
@@ -39,7 +53,13 @@ function normalizeUrl(input: string): string | null {
   }
 }
 
+// Vercel reads this to size the function. 60 is the Hobby ceiling; on a plan
+// that allows more, raise this and REQUEST_BUDGET_MS together.
+export const maxDuration = 60;
+
 export async function POST(request: Request) {
+  const startedAt = Date.now();
+  const remainingBudget = () => REQUEST_BUDGET_MS - (Date.now() - startedAt);
   let body: { url?: string; useAi?: boolean };
   try {
     body = await request.json();
@@ -60,19 +80,27 @@ export async function POST(request: Request) {
   const abort = new AbortController();
 
   try {
-    const result = await withTimeout(crawlSite(normalizedUrl, { signal: abort.signal }), OVERALL_TIMEOUT_MS, abort);
+    // The crawl may use the whole budget when no copyedit is wanted; when one
+    // is, hold back enough that it can actually run.
+    const crawlBudget = useAi ? REQUEST_BUDGET_MS - MIN_AI_BUDGET_MS : REQUEST_BUDGET_MS;
+    const result = await withTimeout(crawlSite(normalizedUrl, { signal: abort.signal }), crawlBudget, abort);
     const deterministic = buildLlmsTxt(result);
     let llmsTxt = deterministic;
 
     // Reported to the UI so a silently-degraded result is never presented as
     // a normal one: "off" (not requested), "unavailable" (no API key),
-    // "applied", "no-changes" (model had nothing to change), "failed".
-    let aiStatus: "off" | "unavailable" | "applied" | "no-changes" | "failed" = "off";
+    // "applied", "no-changes" (model had nothing to change), "failed",
+    // "skipped" (the crawl used the request budget).
+    let aiStatus: "off" | "unavailable" | "applied" | "no-changes" | "failed" | "skipped" = "off";
     if (Boolean(body.useAi) && !isAiConfigured()) aiStatus = "unavailable";
 
-    if (useAi) {
+    const aiBudget = remainingBudget() - RESPONSE_RESERVE_MS;
+    if (useAi && aiBudget < MIN_AI_BUDGET_MS) {
+      aiStatus = "skipped";
+      console.warn(`[generate] skipping AI copyedit: only ${aiBudget}ms of the request budget left`);
+    } else if (useAi) {
       try {
-        const enhanced = await withTimeout(enhanceLlmsTxt(result, deterministic), AI_TIMEOUT_MS);
+        const enhanced = await withTimeout(enhanceLlmsTxt(result, deterministic), aiBudget);
         // The copyedit pass splices model-written text into a document we
         // built; a regression there (a mangled link line, a section left
         // empty by an Optional move) should never reach the user when we

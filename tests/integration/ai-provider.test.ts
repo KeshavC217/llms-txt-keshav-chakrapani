@@ -166,6 +166,21 @@ describe("provider misbehavior", () => {
   });
 });
 
+describe("request budget", () => {
+  it("keeps the whole request inside one budget rather than two independent timeouts", async () => {
+    // Vercel Hobby kills a function at 60s. The crawl and the copyedit used to
+    // hold separate 60s and 65s timeouts, so a slow site could reach 125s and
+    // be killed by the platform — an opaque 504 with no body, losing both the
+    // error message and the deterministic document we were already holding.
+    const { maxDuration } = await import("../../app/api/generate/route");
+    expect(maxDuration).toBeLessThanOrEqual(60);
+
+    const started = Date.now();
+    await generate();
+    expect(Date.now() - started).toBeLessThan(maxDuration * 1000);
+  }, 70_000);
+});
+
 describe("aiStatus contract the UI depends on", () => {
   it("distinguishes every outcome so none of them look alike", async () => {
     expect((await generate(false)).aiStatus).toBe("off");
