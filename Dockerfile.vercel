@@ -35,6 +35,16 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
+# Playwright is copied whole rather than left to Next's file tracing. Tracing
+# follows imports, so it collects playwright-core's JavaScript but not the
+# data files sitting beside it — the image built fine and then failed at
+# runtime with "Cannot find module playwright-core/browsers.json", which is
+# the registry it reads to locate the installed browser. Copying the packages
+# outright is a few megabytes against a browser layer that is already
+# hundreds, and it cannot drift the way a trace glob can.
+COPY --from=deps /app/node_modules/playwright ./node_modules/playwright
+COPY --from=deps /app/node_modules/playwright-core ./node_modules/playwright-core
+
 # The base image runs as root; drop to the unprivileged user it provides.
 USER pwuser
 
