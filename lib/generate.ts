@@ -29,18 +29,29 @@ export interface GenerateOptions {
   budgetMs?: number;
   /** Don't start the copyedit with less than this left. */
   minAiBudgetMs?: number;
+  /** Restrict the crawl to these path prefixes (the homepage is always included). */
+  includePrefixes?: string[];
+  /** Skip these path prefixes. */
+  excludePrefixes?: string[];
 }
 
 const DEFAULT_MIN_AI_BUDGET_MS = 10_000;
 
 export async function generateLlmsTxt(url: string, options: GenerateOptions = {}): Promise<GenerateResult> {
-  const { useAi = false, signal, budgetMs = Infinity, minAiBudgetMs = DEFAULT_MIN_AI_BUDGET_MS } = options;
+  const {
+    useAi = false,
+    signal,
+    budgetMs = Infinity,
+    minAiBudgetMs = DEFAULT_MIN_AI_BUDGET_MS,
+    includePrefixes,
+    excludePrefixes,
+  } = options;
   const startedAt = Date.now();
 
   const wantsAi = useAi && isAiConfigured();
   const aiUnavailable = useAi && !isAiConfigured();
 
-  const result = await crawlSite(url, { signal });
+  const result = await crawlSite(url, { signal, includePrefixes, excludePrefixes });
   const deterministic = buildLlmsTxt(result);
 
   let aiStatus: AiStatus = aiUnavailable ? "unavailable" : "off";

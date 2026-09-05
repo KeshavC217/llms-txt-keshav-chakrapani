@@ -66,6 +66,45 @@ interface FetchResult {
 export interface CrawlOptions {
   /** Aborts in-flight work and stops escalating to the browser (e.g. the request's overall timeout fired). */
   signal?: AbortSignal;
+  /**
+   * Path prefixes to restrict the crawl to. When set, only pages whose path
+   * starts with one of these is crawled — the homepage always is, since it is
+   * the entry point that discovery depends on.
+   *
+   * The generic heuristics cannot know that a docs site's marketing pages are
+   * noise, or that only /blog matters. This is the escape hatch for a person
+   * who does know, and it beats guessing harder.
+   */
+  includePrefixes?: string[];
+  /** Path prefixes to skip, applied after includePrefixes. */
+  excludePrefixes?: string[];
+}
+
+/** Normalizes a user-supplied prefix to a leading-slash path with no trailing slash. */
+export function normalizePrefix(prefix: string): string | null {
+  const trimmed = prefix.trim();
+  if (!trimmed) return null;
+  // Accept a full URL as well as a bare path, since people paste both.
+  let path = trimmed;
+  try {
+    if (/^https?:\/\//i.test(trimmed)) path = new URL(trimmed).pathname;
+  } catch {
+    return null;
+  }
+  const withSlash = path.startsWith("/") ? path : `/${path}`;
+  const normalized = withSlash.replace(/\/+$/, "");
+  return normalized || "/";
+}
+
+/** Whether a URL's path sits under one of the given prefixes. */
+export function matchesPrefix(url: string, prefixes: string[]): boolean {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname.replace(/\/+$/, "") || "/";
+  } catch {
+    return false;
+  }
+  return prefixes.some((prefix) => prefix === "/" || pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 /**
@@ -477,7 +516,17 @@ export async function crawlSite(rootUrl: string, options: CrawlOptions = {}): Pr
       ...homepageLinks.filter((l) => !navHrefs.has(l)),
       ...sitemapLinks,
     ];
-    const candidateLinks = Array.from(new Set(ordered)).slice(0, MAX_PAGES);
+    // Caller-supplied scoping, applied before the page budget so the budget is
+    // spent entirely on pages the caller actually wants.
+    const include = (options.includePrefixes ?? []).map(normalizePrefix).filter((p): p is string => p !== null);
+    const exclude = (options.excludePrefixes ?? []).map(normalizePrefix).filter((p): p is string => p !== null);
+    const scoped = Array.from(new Set(ordered)).filter((link) => {
+      if (include.length > 0 && !matchesPrefix(link, include)) return false;
+      if (exclude.length > 0 && matchesPrefix(link, exclude)) return false;
+      return true;
+    });
+
+    const candidateLinks = scoped.slice(0, MAX_PAGES);
 
     const fetchedPages = await mapWithConcurrency(
       candidateLinks,

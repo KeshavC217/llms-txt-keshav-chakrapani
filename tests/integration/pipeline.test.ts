@@ -141,6 +141,28 @@ describe("end-to-end crawl of a fixture site", () => {
   });
 });
 
+describe("prefix scoping", () => {
+  it("restricts the crawl to the requested prefixes", async () => {
+    const scoped = await crawlSite(server.url, { includePrefixes: ["/docs"] });
+    const paths = scoped.pages.map((p) => p.url.replace(server.url, ""));
+
+    // The homepage is the entry point discovery depends on, so it stays.
+    expect(paths).toContain("/");
+    expect(paths.filter((p) => p !== "/").every((p) => p.startsWith("/docs"))).toBe(true);
+    expect(paths).toContain("/docs/getting-started");
+    expect(paths).not.toContain("/pricing");
+  }, 60_000);
+
+  it("skips excluded prefixes", async () => {
+    const scoped = await crawlSite(server.url, { excludePrefixes: ["/docs", "/blog"] });
+    const paths = scoped.pages.map((p) => p.url.replace(server.url, ""));
+
+    expect(paths).toContain("/pricing");
+    expect(paths.some((p) => p.startsWith("/docs"))).toBe(false);
+    expect(paths.some((p) => p.startsWith("/blog"))).toBe(false);
+  }, 60_000);
+});
+
 describe("crawl politeness", () => {
   it("waits and retries when the host answers 429, instead of dropping the page", () => {
     // A 429 means "too fast", not "this page is broken" — dropping it loses a

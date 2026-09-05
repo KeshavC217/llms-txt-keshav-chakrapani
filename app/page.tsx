@@ -48,6 +48,9 @@ function timeAgo(iso: string | null): string {
 export default function Home() {
   const [url, setUrl] = useState("");
   const [useAi, setUseAi] = useState(false);
+  const [showScope, setShowScope] = useState(false);
+  const [includePrefixes, setIncludePrefixes] = useState("");
+  const [excludePrefixes, setExcludePrefixes] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [llmsTxt, setLlmsTxt] = useState("");
   const [pageCount, setPageCount] = useState<number | null>(null);
@@ -108,7 +111,7 @@ export default function Home() {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, useAi, refresh }),
+        body: JSON.stringify({ url, useAi, refresh, includePrefixes, excludePrefixes }),
       });
       const data = await res.json();
 
@@ -252,6 +255,13 @@ export default function Home() {
               />
               Use AI to polish titles and section names
             </label>
+            <button
+              type="button"
+              onClick={() => setShowScope((v) => !v)}
+              className="underline underline-offset-2 hover:text-foreground"
+            >
+              {showScope ? "Hide scope" : "Limit to sections"}
+            </button>
             {monitoringAvailable && (
               <button
                 type="button"
@@ -263,6 +273,32 @@ export default function Home() {
               </button>
             )}
           </div>
+          {showScope && (
+            <div className="flex flex-col sm:flex-row gap-3 text-sm">
+              <label className="flex-1 flex flex-col gap-1">
+                <span className="text-foreground/60 text-xs">
+                  Only crawl these paths — one per line, e.g. <code>/docs</code>
+                </span>
+                <textarea
+                  value={includePrefixes}
+                  onChange={(e) => setIncludePrefixes(e.target.value)}
+                  rows={2}
+                  placeholder="/docs&#10;/blog"
+                  className="rounded-lg border border-foreground/15 bg-transparent px-3 py-2 font-mono text-xs outline-none focus:border-foreground/40"
+                />
+              </label>
+              <label className="flex-1 flex flex-col gap-1">
+                <span className="text-foreground/60 text-xs">Skip these paths</span>
+                <textarea
+                  value={excludePrefixes}
+                  onChange={(e) => setExcludePrefixes(e.target.value)}
+                  rows={2}
+                  placeholder="/careers&#10;/legal"
+                  className="rounded-lg border border-foreground/15 bg-transparent px-3 py-2 font-mono text-xs outline-none focus:border-foreground/40"
+                />
+              </label>
+            </div>
+          )}
         </form>
 
         {status === "error" && <p className="text-sm text-red-500 text-center">{error}</p>}

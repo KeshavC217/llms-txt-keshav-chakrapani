@@ -24,7 +24,13 @@ const CLIENT_ERROR_PATTERNS = [/publicly reachable/i, /Only http and https/i, /C
 const CACHE_MAX_AGE_MS = Number(process.env.GENERATE_CACHE_MAX_AGE_MS ?? 15 * 60_000);
 
 export async function POST(request: Request) {
-  let body: { url?: string; useAi?: boolean; refresh?: boolean };
+  let body: {
+    url?: string;
+    useAi?: boolean;
+    refresh?: boolean;
+    includePrefixes?: string[];
+    excludePrefixes?: string[];
+  };
   try {
     body = await request.json();
   } catch {
@@ -36,10 +42,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Please enter a valid URL." }, { status: 400 });
   }
 
+  const includePrefixes = toPrefixList(body.includePrefixes);
+  const excludePrefixes = toPrefixList(body.excludePrefixes);
+  // A scoped crawl is a different question than an unscoped one, so it must
+  // not be answered from a cache built without those prefixes.
+  const scoped = includePrefixes.length > 0 || excludePrefixes.length > 0;
+
   // Serve a recent stored result instead of re-crawling. Crawling is slow and
   // hits a third party; repeating it for the same URL within minutes is rude
   // to them and pointless for us.
-  if (!body.refresh && isStoreConfigured()) {
+  if (!body.refresh && !scoped && isStoreConfigured()) {
     try {
       const site = await getSiteByUrl(normalizedUrl);
       const snapshot = site ? await latestSnapshot(site.id) : null;
@@ -71,6 +83,8 @@ export async function POST(request: Request) {
         signal: abort.signal,
         budgetMs: REQUEST_BUDGET_MS,
         minAiBudgetMs: MIN_AI_BUDGET_MS,
+        includePrefixes,
+        excludePrefixes,
       }),
       REQUEST_BUDGET_MS,
       abort
@@ -79,7 +93,9 @@ export async function POST(request: Request) {
     // Persist so the next request for this URL is served from storage rather
     // than re-crawling someone else's site. Best-effort: a storage failure
     // must not lose a document we already generated successfully.
-    if (isStoreConfigured()) {
+    // A scoped result answers a narrower question, so caching it under the
+    // plain URL would serve it to someone who asked for the whole site.
+    if (!scoped && isStoreConfigured()) {
       try {
         const site = await upsertSite(normalizedUrl, { useAi: Boolean(body.useAi) });
         await recordGeneration(site, result.llmsTxt, {
@@ -106,6 +122,13 @@ export async function POST(request: Request) {
   } finally {
     abort.abort();
   }
+}
+
+/** Accepts an array or a newline/comma separated string, since the UI sends text. */
+function toPrefixList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string" && v.trim() !== "");
+  if (typeof value === "string") return value.split(/[\n,]/).map((v) => v.trim()).filter(Boolean);
+  return [];
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, abort?: AbortController): Promise<T> {
