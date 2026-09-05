@@ -131,10 +131,38 @@ export async function renderPage(browser: Browser, url: string): Promise<string 
   }
 }
 
+/**
+ * Obtains a browser, from whichever provider this deployment has.
+ *
+ * Three ways to get one, chosen by environment rather than by code, so
+ * changing hosts is configuration:
+ *
+ *   BROWSER_WS_ENDPOINT — connect to a remote browser over CDP (Browserless,
+ *   Browserbase, or a browser container you run). Officially supported by
+ *   Playwright and the only option on a host that cannot ship a binary.
+ *
+ *   PLAYWRIGHT_EXECUTABLE_PATH — launch a Chromium that lives somewhere other
+ *   than Playwright's own cache, which is how serverless Chromium builds
+ *   (@sparticuz/chromium and friends) are used.
+ *
+ *   Neither — launch Playwright's bundled Chromium. Local dev, and any
+ *   container built on the official Playwright image.
+ *
+ * Returns null on any failure rather than throwing: rendering is a fallback,
+ * and a deployment without a browser should degrade to fetch-only rather than
+ * fail every crawl. The cost of that is silent, so the reason is logged.
+ */
 export async function launchBrowser(): Promise<Browser | null> {
+  const wsEndpoint = process.env.BROWSER_WS_ENDPOINT;
+  const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+
   try {
-    return await chromium.launch({ headless: true });
-  } catch {
+    if (wsEndpoint) return await chromium.connectOverCDP(wsEndpoint);
+    return await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+  } catch (err) {
+    console.warn(
+      `[browser] unavailable, falling back to fetch-only crawling: ${err instanceof Error ? err.message : err}`
+    );
     return null;
   }
 }

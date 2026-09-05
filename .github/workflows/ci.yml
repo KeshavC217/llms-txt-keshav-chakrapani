@@ -47,10 +47,49 @@ jobs:
       - name: Build
         run: npm run build
 
+  # Builds the container image on every push to main. Docker is not available
+  # on the dev machine this was written on, so without this the Dockerfile
+  # would be an untested claim — and "the deploy image builds" is exactly the
+  # thing you want to learn from CI rather than from a failed deploy.
+  container:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.vercel
+          push: false
+          load: true
+          tags: llms-txt:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify Chromium actually launches inside the image
+        run: |
+          # The whole point of the container is that Playwright works in it.
+          # Building successfully proves nothing about that.
+          docker run --rm llms-txt:ci node -e "
+            const { chromium } = require('playwright');
+            chromium.launch({ headless: true })
+              .then(async (b) => {
+                const page = await b.newPage();
+                await page.setContent('<h1>ok</h1>');
+                const text = await page.textContent('h1');
+                await b.close();
+                if (text !== 'ok') throw new Error('unexpected render: ' + text);
+                console.log('Chromium launched and rendered inside the image');
+              })
+              .catch((e) => { console.error(e); process.exit(1); });
+          "
+
   # Deploys only run when `verify` passed. Without needs:, a deploy job runs
   # in parallel with the tests and ships whatever CI was about to reject.
   deploy:
-    needs: verify
+    needs: [verify, container]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:

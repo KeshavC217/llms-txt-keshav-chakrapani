@@ -1,0 +1,44 @@
+# Container image for hosts that run OCI images — Vercel (Dockerfile.vercel),
+# Railway, Render, Fly.
+#
+# Built on Microsoft's own Playwright image because Chromium is baked in.
+# The alternative — `npm i playwright` plus `npx playwright install` — puts a
+# ~400MB browser in a cache directory outside node_modules, which a serverless
+# bundler will not trace and a bundle-size limit will not fit. Pairing
+# playwright-core with a third-party serverless Chromium build is the other
+# way, but it is not an officially supported combination and drifts on every
+# version bump. This image is the boring option that works everywhere.
+#
+# Pinned to the version in package.json: Playwright refuses to drive a browser
+# from a different release, so this tag and the dependency must move together.
+FROM mcr.microsoft.com/playwright:v1.62.1-noble AS base
+WORKDIR /app
+
+# Dependencies first, so a source change does not reinstall the world.
+FROM base AS deps
+COPY package.json package-lock.json ./
+RUN npm ci
+
+FROM base AS builder
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+FROM base AS runner
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Next's standalone output ships only the files the server actually needs,
+# which keeps the image small even though the browser layer is large.
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
+
+# The base image runs as root; drop to the unprivileged user it provides.
+USER pwuser
+
+EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+CMD ["node", "server.js"]
