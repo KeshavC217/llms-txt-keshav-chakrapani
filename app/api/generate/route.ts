@@ -4,6 +4,9 @@ import { isIP } from "node:net";
 
 import { extract, render } from "@/lib/naiveExtractor";
 import { validateLlmsTxt } from "@/lib/spec";
+import { checkLlmAccess } from "@/lib/authGate";
+import { authConfigured } from "@/lib/supabase/config";
+import { getUser } from "@/lib/supabase/server";
 
 /**
  * Fetches the URL the user typed and builds an llms.txt out of that single
@@ -83,7 +86,7 @@ async function assertPublicUrl(url: string): Promise<void> {
 }
 
 export async function POST(request: Request) {
-  let body: { url?: string };
+  let body: { url?: string; enhance?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -93,6 +96,18 @@ export async function POST(request: Request) {
   const url = normalizeUrl(body.url ?? "");
   if (!url) {
     return NextResponse.json({ error: "Please enter a valid URL." }, { status: 400 });
+  }
+
+  // Checked before the fetch: refusing after spending fifteen seconds on
+  // someone else's server would waste their bandwidth to tell us nothing.
+  const enhanceRequested = body.enhance === true;
+  const access = checkLlmAccess({
+    enhanceRequested,
+    signedIn: enhanceRequested ? Boolean(await getUser()) : false,
+    authConfigured,
+  });
+  if (!access.allowed) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
   try {
