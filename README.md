@@ -1,9 +1,20 @@
-# llms.txt Generator (v0)
+# llms.txt Generator
 
-A tool that crawls a website and generates an [`llms.txt`](https://llmstxt.org) file. The
-crawl, extraction and sectioning are fully deterministic (heuristics + lightweight NLP); an
-optional LLM pass then copyedits the finished document. This is an early version — no automated
-monitoring/updates, no deployment. It runs locally.
+**Live: <https://llms-txt-keshav-chakrapani.vercel.app>**
+
+A tool that crawls a website, generates an [`llms.txt`](https://llmstxt.org) file, and keeps it
+up to date as the site changes. The crawl, extraction and sectioning are fully deterministic
+(heuristics + lightweight NLP); an optional LLM pass then copyedits the finished document.
+
+![The generator UI](docs/screenshots/home.png)
+
+![A generated llms.txt](docs/screenshots/result.png)
+
+The deterministic core is the point. An LLM never sees a URL it can invent from, never decides
+which pages exist, and cannot emit a malformed file — it is handed a finished document and
+allowed to return a *sparse edit map*, every entry of which is validated against the known page
+set before being applied. If the edited result fails the spec validator, the deterministic
+version is served instead. The model improves wording; it cannot damage structure.
 
 ## How it works
 
@@ -109,7 +120,101 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000), enter a URL (e.g. `example.com`), and click
-**Generate**.
+**Generate**. That is the whole setup — generation needs no keys and no database.
+
+To also get persistence, change detection and the monitoring dashboard, copy `.env.example` to
+`.env`, fill in a Supabase project (apply `db/schema.sql`, then anything in `db/migrations/`) and
+a `CRON_SECRET`. Add `OPENROUTER_API_KEY` for the AI copyedit pass. Each is independent: the tool
+degrades feature by feature rather than failing.
+
+## Deployment
+
+Deployed to Vercel as a **container**, not as a serverless bundle. That is the whole reason
+`Dockerfile.vercel` exists, and the filename is not incidental: Vercel detects a file by that
+exact name, builds it, pushes it to Vercel Container Registry, and routes all traffic to it as a
+Function on Fluid compute.
+
+The container is necessary because of Playwright. A normal Vercel build traces imports to decide
+what to bundle, and Chromium is not an import — `npx playwright install` drops a ~400MB browser
+into a cache directory outside `node_modules` that no bundler will trace and no 250MB bundle
+limit would fit. Pairing `playwright-core` with a third-party serverless Chromium is the usual
+workaround, but it is not an officially supported combination and drifts on every version bump.
+Building on Microsoft's own Playwright image, which has Chromium baked in, is the boring option
+that works. The image tag and the `playwright` dependency must move together — Playwright
+refuses to drive a browser from a different release.
+
+### First deploy
+
+```bash
+npm i -g vercel
+vercel login
+vercel link --project llms-txt-<your-name>
+
+# Secrets. Everything except OPENROUTER_API_KEY is required for monitoring;
+# the generator itself runs with none of them.
+vercel env add SUPABASE_URL production
+vercel env add SUPABASE_SECRET_KEY production
+vercel env add OPENROUTER_API_KEY production
+vercel env add CRON_SECRET production      # openssl rand -hex 32
+
+# Required. Vercel routes to port 80 unless PORT is set as a *project*
+# env var — an ENV PORT line inside the Dockerfile is not enough, and
+# getting this wrong produces a deployment that builds and then 502s.
+vercel env add PORT production             # 3000
+
+vercel deploy --prod
+```
+
+Then apply `db/schema.sql` (and `db/migrations/`) to your Supabase project, and set two GitHub
+repository secrets so the monitoring workflow can reach the deployment:
+
+```bash
+gh secret set APP_URL      # https://your-app.vercel.app
+gh secret set CRON_SECRET  # the same value you gave Vercel
+```
+
+### Verifying a deployment
+
+```bash
+curl https://your-app.vercel.app/api/health
+```
+
+```json
+{ "ok": true, "browser": { "available": true, "error": null },
+  "store": { "configured": true }, "ai": { "configured": true } }
+```
+
+`browser.available` is the one worth checking. Rendering is a *fallback*: `launchBrowser()`
+returns null rather than throwing, so a deployment without a working browser degrades to
+fetch-only instead of failing every crawl. That is right at runtime and invisible at deploy time
+— a broken browser looks exactly like a site that never needed one, and the only symptom is
+quietly worse output on JS-rendered pages. CI proves Chromium launches inside the *image*; it
+cannot prove it launches inside the *host's* sandbox, where seccomp policy, `/dev/shm` and the
+memory ceiling all differ. This endpoint asks that question against the real deployment, and
+renders a page rather than only launching one, since a browser that dies on its first page would
+pass a bare launch check.
+
+### Monitoring schedule
+
+`.github/workflows/monitor.yml` calls `POST /api/refresh` hourly. GitHub Actions rather than
+Vercel Cron because Vercel's Hobby plan caps cron at once per day with ±59 minutes of jitter,
+which is too coarse to be a useful monitor. The endpoint is plain authenticated HTTP and only
+acts on sites whose `next_check_at` is due, so the cron cadence is an upper bound on
+responsiveness, not a crawl rate — and moving to Vercel Cron later is a change of caller, not of
+code.
+
+### Deploy gating
+
+CI (`.github/workflows/ci.yml`) typechecks, lints, runs unit and integration tests, builds the
+app, then builds the container image *and launches Chromium inside it* — building successfully
+proves nothing about whether the browser runs, which is the entire reason the container exists.
+The `deploy` job requires all of that to pass.
+
+It is currently an advisory gate. Making it binding means disabling Vercel's automatic Git
+deploys and running `vercel deploy --prod` from Actions with a `VERCEL_TOKEN` secret; otherwise
+Vercel's Git integration deploys in parallel with the tests and can ship a commit CI was about to
+reject. This deployment is pushed from the CLI, so the tests and the deploy are sequenced by
+hand rather than by the platform.
 
 ## Testing
 
@@ -227,7 +332,10 @@ liveness and recall are checkable facts, so they gate; the judge informs.
   public here and private when `fetch` re-resolves it). The post-redirect check means an attacker
   can't read an internal response body, which is the part that leaks; fully closing it needs
   pinned-IP dialing.
-- No persistence, no automated re-crawling/change detection.
+- Tracking is anonymous and unauthenticated. A per-deployment cap (`MAX_TRACKED_SITES`,
+  default 100) and a floor on check frequency (`MIN_CHECK_INTERVAL_HOURS`, default 6) are the
+  only things stopping one person queueing a thousand sites for the crawler to hit. That is a
+  cap, not auth, and real multi-tenant use would need accounts.
 - Requests to a host are paced (`CRAWL_MIN_REQUEST_INTERVAL_MS`, default 120ms) and back off
   automatically on 429/503, honouring `Retry-After`. The backoff is permanent for the rest of the
   crawl rather than per-request: a server that just said "too fast" will say it again if the other
@@ -248,6 +356,9 @@ liveness and recall are checkable facts, so they gate; the judge informs.
 app/
   page.tsx              Main UI: URL input, generate button, result preview, download
   api/generate/route.ts POST endpoint that runs the crawl + build pipeline
+  api/sites/route.ts    Track/list/untrack monitored sites; snapshot history
+  api/refresh/route.ts  Authenticated re-crawl of due sites, for the scheduler
+  api/health/route.ts   Deployment diagnostics: is the browser/store/AI actually live
 lib/
   crawler.ts            Discovery + fetch: robots, sitemap, ranking, dedupe, bounded concurrency
   extract.ts            Title/description/canonical/link extraction, incl. prose fallback
@@ -261,7 +372,15 @@ lib/
   openrouter.ts         OpenRouter client: JSON extraction, retry, timeouts
   ai.ts                 Optional LLM copyedit pass (sparse, validated edit map)
   judge.ts              LLM-as-judge scoring, for the evals only
+  generate.ts           The pipeline shared by every entry point (UI, cron, tests)
+  parse.ts              Parses an llms.txt back into structure, for diffing
+  diff.ts               Structural diff between two snapshots + a human summary
+  store.ts              Supabase persistence: tracked sites, snapshots, scheduling
+  rateLimit.ts          Per-host request pacing with automatic 429/503 backoff
   types.ts              Shared types
+db/
+  schema.sql            Tables, indexes, RLS
+  migrations/           Incremental changes to apply on top of an existing schema
 tests/
   unit/                 Pure functions
   helpers/              Fixture site, fake OpenRouter, shared eval metrics
@@ -273,9 +392,30 @@ tests/
 
 ## Environment
 
+See `.env.example` for the annotated version. Nothing here is required to generate an
+`llms.txt` — without Supabase the tool works, it just cannot remember or monitor anything.
+
 ```
-OPENROUTER_API_KEY   enables the AI copyedit pass and the eval's judge
-OPENROUTER_MODEL     override the model (default: google/gemma-4-31b-it)
-MAX_CRAWL_PAGES      page budget per crawl (default: 100)
-MAX_CRAWL_CONCURRENCY  parallel fetches (default: 8)
+OPENROUTER_API_KEY       enables the AI copyedit pass and the eval's judge
+OPENROUTER_MODEL         override the model (default: google/gemma-4-31b-it)
+
+SUPABASE_URL             required for persistence + monitoring
+SUPABASE_SECRET_KEY      server-only secret key (sb_secret_...); never NEXT_PUBLIC_
+CRON_SECRET              shared secret required by /api/refresh
+
+PORT                     3000 — required on Vercel, which otherwise routes to :80
+BROWSER_WS_ENDPOINT      connect to a remote browser over CDP instead of launching one
+PLAYWRIGHT_EXECUTABLE_PATH  launch a Chromium from outside Playwright's cache
+
+MAX_CRAWL_PAGES          page budget per crawl (default: 100)
+MAX_CRAWL_CONCURRENCY    parallel fetches (default: 8)
+MAX_CRAWL_RENDERS        browser-render budget per crawl (default: 30)
+MAX_TRACKED_SITES        cap on monitored sites (default: 100)
+MIN_CHECK_INTERVAL_HOURS floor on monitoring frequency (default: 6)
+GENERATE_CACHE_MAX_AGE_MS  how long a stored snapshot is served (default: 15m)
 ```
+
+The browser is chosen by environment rather than by code, so changing hosts is configuration:
+`BROWSER_WS_ENDPOINT` connects to a remote browser (Browserless, Browserbase), 
+`PLAYWRIGHT_EXECUTABLE_PATH` points at a Chromium living outside Playwright's cache, and neither
+set launches the bundled one.
