@@ -24,7 +24,12 @@ TEMPLATE.txt             the target shape, and the rules the extractor follows
 app/
   page.tsx               URL input, result preview, download
   api/generate/route.ts  POST { url } -> fetch -> guard -> build
+proxy.ts                 refreshes the Supabase session on every request
+app/
+  login/                 email + password sign-in
 lib/
+  authGate.ts            who may use the LLM features
+  supabase/              browser, server and config clients
   dom.ts                 HTML -> a small tree that can be measured
   nlp.ts                 tokenizing, stemming, overlap, sentence splitting
   naiveExtractor.ts      the tree -> { siteName, summary, sections } -> llms.txt
@@ -141,6 +146,28 @@ can reach — `http://169.254.169.254/` (cloud instance metadata) included. A pu
 
 Set `ALLOW_PRIVATE_CRAWL_TARGETS=1` to bypass it when testing against a local server.
 
+## Accounts
+
+The generator is open to everyone. An account is only required for the LLM features, which cost
+money per call and need an identity to attribute that to. `lib/authGate.ts` holds that rule as a
+pure function, checked before the fetch rather than after - refusing once we have already spent
+fifteen seconds on someone else's server wastes their bandwidth to tell us nothing.
+
+Sign-in is email and password, through Supabase. Two details differ from every Supabase guide you
+will find, because this is Next 16:
+
+- Session refresh lives in **`proxy.ts`**, not `middleware.ts`. The middleware convention is
+  deprecated and renamed in Next 16.
+- `cookies()` is **async**, so the server client is async too.
+
+The session is verified with `getUser()` rather than read from `getSession()`. getSession trusts the
+cookie; getUser checks the token with Supabase. For deciding whether to spend money on an LLM call,
+the cookie's own claim is not good enough.
+
+With the Supabase variables unset the app still runs: the generator works, and the AI toggle says it
+is not configured rather than offering a sign-in that cannot happen. A request for the LLM path then
+gets 503, not 401 - the caller did nothing wrong and signing in would not help.
+
 ## Tests
 
 ```bash
@@ -180,9 +207,11 @@ Merging deploys to production.
 on push regardless of CI, so a red check can sit next to a working preview — production is what
 the protection gates.
 
-CI pins Node 24 to match the npm that writes `package-lock.json`. npm 10 and npm 11 lay out the
-wasm fallback dependencies differently, and `npm ci` rejects a lock file whose layout is not the
-one it would have built.
+CI pins Node 24, and pins npm to the exact version that writes `package-lock.json`. npm decides how
+the wasm fallback dependencies are laid out in the lock file, and `npm ci` rejects a layout it would
+not have written. Pinning Node alone is not enough, because its bundled npm moves with patch
+releases - a lock written by 11.6.2 met a runner carrying 11.19.1 and the install failed. Regenerate
+the lock with `npx npm@11.19.1 install`, matching the version in `ci.yml`.
 
 ## History
 
