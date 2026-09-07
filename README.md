@@ -28,6 +28,10 @@ lib/
   dom.ts                 HTML -> a small tree that can be measured
   nlp.ts                 tokenizing, stemming, overlap, sentence splitting
   naiveExtractor.ts      the tree -> { siteName, summary, sections } -> llms.txt
+  spec.ts                the llmstxt.org grammar: escaping out, parsing back
+tests/
+  fixtures.ts            mock pages, one per genre the extractor meets
+  *.test.ts              node:test suites, run with `npm test`
 ```
 
 `POST /api/generate` takes `{ "url": "example.com" }` and returns:
@@ -82,6 +86,33 @@ Everything is inferred from structure and word overlap.
 
 A non-HTML response has nothing to parse and passes through unchanged.
 
+### Conformance
+
+The output follows the grammar at [llmstxt.org](https://llmstxt.org) strictly: one H1 and it comes
+first, no heading deeper than H2, sections that contain list items and nothing else, and every item
+carrying a hyperlink. Values are escaped on the way out, so a page whose link title contains `]`,
+whose URL contains `(`, or whose first paragraph begins `##` cannot produce a file that stops
+parsing.
+
+`lib/spec.ts` implements the grammar both ways - escaping to make output conform, parsing to check
+it did. Every response reports the result:
+
+```json
+"spec": { "valid": true, "issues": [] }
+```
+
+`npm test` includes the conformance suite: the spec's own FastHTML example, seven files that must be
+rejected, and eight hostile pages run through the real pipeline. CI runs it on every PR. The
+adversarial cases earned their place - they caught a bug where correctly escaped `\[draft\]` was
+rejected by the validator's own regex.
+
+Two things the spec recommends that a single fetch cannot honestly do. It asks that links point at
+markdown versions of pages; we cannot know a `.md` twin exists without fetching it, and inventing
+those URLs would mean emitting links we have never seen. And where a page advertises
+`rel="alternate" type="text/markdown"` or `rel="describedby"`, that is reported rather than acted
+on - a markdown twin for the fetched page says nothing verifiable about the pages it links to. If a
+site already publishes its own llms.txt, the UI says so: theirs is authoritative.
+
 ### Known limits
 
 Most links carry no note. A single page rarely says anything about the pages it links to, and the
@@ -109,6 +140,27 @@ can reach — `http://169.254.169.254/` (cloud instance metadata) included. A pu
 `302` into the private range, which is why the post-redirect check exists.
 
 Set `ALLOW_PRIVATE_CRAWL_TARGETS=1` to bypass it when testing against a local server.
+
+## Tests
+
+```bash
+npm test        # node --test, no framework and no dependencies
+```
+
+Node 24 runs TypeScript directly, so the suites are `.ts` and import the modules they test. That is
+why `lib` modules import each other by full filename (`./dom.ts`) and why type-only imports carry an
+inline `type` marker: Node strips types when it runs a file and cannot otherwise tell an interface
+from a value.
+
+`tests/fixtures.ts` holds mock pages, one per genre the extractor actually meets - a documentation
+site with a sidebar and cards, a marketing site reaching one page by four URLs, an application
+shell, locale-prefixed paths, a chrome-heavy page, and deliberately malformed markup. Several encode
+a specific bug found against live sites, so a regression has somewhere to fail loudly.
+
+Writing them found five real defects: `<p>` inside a `<div>` closed the `<div>` (the implicit-close
+table was keyed backwards), `stem("guides")` did not match `stem("guide")`, `stripBrandSuffix` left
+a two-word brand in place, deduping a link kept the nav copy and threw away the card's description,
+and a card description was repeated as orienting prose.
 
 ## Environment
 
