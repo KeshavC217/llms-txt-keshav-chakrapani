@@ -8,9 +8,26 @@ interface Result {
   contentType: string | null;
   truncated: boolean;
   llmsTxt: string;
+  enhanced?: boolean;
+  report?: { notesAccepted: number; notesRejected: number; sectionsRenamed: number; chunksFailed: number; guideModel: string; workerModel: string; reason?: string };
   spec?: { valid: boolean; issues: { line: number; message: string }[] };
   markdownAlternate?: string;
   existingLlmsTxt?: string;
+}
+
+/** Says what the models actually changed, rather than that they ran. */
+function describeReport(report: NonNullable<Result["report"]>): string {
+  const changes = [
+    report.notesAccepted > 0 && `${report.notesAccepted} notes`,
+    report.sectionsRenamed > 0 && `${report.sectionsRenamed} sections renamed`,
+  ].filter(Boolean);
+
+  if (changes.length === 0) return "AI added nothing";
+
+  // A failed chunk means links that silently kept no note, which is worth
+  // saying: the file is thinner than it looks, and not because the page was.
+  const failed = report.chunksFailed > 0 ? `, ${report.chunksFailed} chunks failed` : "";
+  return `${changes.join(", ")}${failed}`;
 }
 
 export function Generator({ signedIn, authConfigured }: { signedIn: boolean; authConfigured: boolean }) {
@@ -27,10 +44,11 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
     setResult(null);
 
     try {
-      const response = await fetch("/api/generate", {
+      // Separate endpoint: it needs an account, spends money, and takes seconds.
+      const response = await fetch(enhance ? "/api/enhance" : "/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, enhance }),
+        body: JSON.stringify({ url }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Something went wrong.");
@@ -72,7 +90,7 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
           disabled={loading || !url.trim()}
           className="rounded-lg bg-neutral-900 px-6 py-3 font-medium text-white disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900"
         >
-          {loading ? "Fetching…" : "Generate"}
+          {loading ? (enhance ? "Thinking…" : "Fetching…") : "Generate"}
         </button>
       </form>
 
@@ -110,6 +128,12 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
               HTTP {result.status} · {result.contentType ?? "unknown type"} ·{" "}
               {result.llmsTxt.length.toLocaleString()} chars
               {result.truncated && " (truncated)"}
+              {result.report && (
+                <>
+                  {" · "}
+                  <span>{describeReport(result.report)}</span>
+                </>
+              )}
               {result.spec && (
                 <>
                   {" · "}
