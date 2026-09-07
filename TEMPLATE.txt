@@ -1,0 +1,146 @@
+llms.txt — target skeleton
+==========================
+
+The shape the generator aims at. Derived from the spec at https://llmstxt.org and from 22 live
+files sampled off https://llmstxt.site (see "Where this comes from" at the bottom).
+
+Sites differ too much for a rigid template, so what follows fixes the *structure* and leaves the
+vocabulary open. Section names are chosen from the page, never from a fixed list — in the sample,
+almost every H2 name was site-specific.
+
+
+THE SKELETON
+------------
+
+    # {{site_name}}
+
+    > {{one_sentence_summary}}
+
+    {{orienting_prose}}
+
+    ## {{section_name}}
+
+    - [{{link_title}}]({{url}}): {{note}}
+    - [{{link_title}}]({{url}}): {{note}}
+
+    ## {{section_name}}
+
+    - [{{link_title}}]({{url}}): {{note}}
+
+    ## Optional
+
+    - [{{link_title}}]({{url}}): {{note}}
+
+
+Order is fixed and comes from the spec: title, then summary, then free prose, then H2 sections.
+No heading may appear in the prose block — the first H2 ends it.
+
+
+SLOTS
+-----
+
+{{site_name}}            Required; the only required element in the spec.
+                         The site or project name, not the page's <title> verbatim — strip the
+                         trailing " – Brand" / " | Brand" suffix a CMS appends.
+                         Source order: og:site_name, og:title, <title>, <h1>, hostname.
+
+{{one_sentence_summary}} Optional, but present in 14/22 sampled files. One line, no trailing
+                         period needed, enough for a reader to know what the site is before
+                         reading anything else.
+                         Source order: meta description, og:description, twitter:description,
+                         first substantive paragraph of the body.
+
+{{orienting_prose}}      Optional. Zero or more paragraphs or lists — anything except a heading.
+                         Use it for what an agent needs in order to read the rest correctly:
+                         what the product is, who it's for, terms used oddly. Omit it entirely
+                         rather than pad it. 10/22 files had prose here; several would read
+                         better without.
+
+{{section_name}}         An H2 grouping related links. Taken from the page's own language — a
+                         nav group label, a section heading above the links, or the shared path
+                         segment they sit under (/docs/* -> "Docs"). Title case, a word or three.
+                         Fall back to a small generic set only when the page offers nothing:
+                         Documentation, Product, Company, Resources.
+
+{{link_title}}           The page being linked, named as that page would name itself. Anchor
+                         text if it is descriptive; otherwise the target's own title. Never a
+                         bare URL, never "click here", never an empty string.
+
+{{url}}                  Absolute. Same site as the source page. Deduped: one entry per target,
+                         fragments stripped, http/https and trailing-slash variants collapsed.
+
+{{note}}                 Optional but strongly preferred — 12/22 sampled files carry one on most
+                         links, and it is what makes the file worth more than a sitemap. One
+                         clause, no terminal period, saying what is at that URL. It must not
+                         restate {{link_title}}: "Pricing: pricing" earns nothing. Omit rather
+                         than restate.
+
+## Optional             A literal section name, reserved by spec convention for links an agent
+                         can skip when context is tight. Put low-value-but-real pages here:
+                         legal, careers, press, changelog archives, social profiles.
+                         3/22 sampled files used it. Never invent other reserved names.
+
+
+RULES
+-----
+
+1. Structure over completeness. A curated file beats an exhaustive one; that is the entire
+   premise of llms.txt over sitemap.xml. Dropping a link is cheap, and a link with no note and
+   no clear title is usually worth dropping.
+
+2. One idea per line. Every list item is a link line. No multi-sentence notes, no nested bullets.
+
+3. Nothing appears twice. The same URL must not appear under two sections. Near-duplicate titles
+   ("Pricing", "Our Pricing", "Pricing - Acme") are the same page until proven otherwise, and
+   the shortest form wins.
+
+4. Boilerplate is not content. Nav bars, footers, cookie banners, "on this page" rails, social
+   icon rows and skip links are navigation furniture. They are the source of *links*, not of
+   prose, and none of their text belongs in {{orienting_prose}}.
+
+5. Headings come from the document, not from the text. An <h2> is a heading; a <p> in bold
+   16px is not, unless nothing else is available. Depth is relative — a page whose only
+   headings are <h3> still has those as its top level. Do not emit a heading level deeper than
+   H2 unless a section genuinely nests; the spec's file lists are flat.
+
+6. Empty sections are dropped. A section name with no links under it is noise.
+
+7. When a slot cannot be filled honestly, omit it. An absent summary is better than a summary
+   invented from the page's marketing copy.
+
+
+WHAT A MINIMAL VALID FILE LOOKS LIKE
+------------------------------------
+
+    # Acme
+
+    > Invoicing for freelancers
+
+    ## Documentation
+
+    - [Quickstart](https://acme.com/docs/quickstart): Send a first invoice in five minutes
+    - [API reference](https://acme.com/docs/api): Endpoints, auth and rate limits
+
+That is a complete file. Everything beyond it is elaboration.
+
+
+WHERE THIS COMES FROM
+---------------------
+
+Spec: https://llmstxt.org — H1 required; blockquote summary; then non-heading sections; then H2
+"file list" sections of `- [name](url): notes`; "Optional" reserved by convention.
+
+Sample: 22 files fetched from https://llmstxt.site, median 18 KB (417 B – 852 KB).
+
+    19/22  use ## sections
+    18/22  have a single # title
+    16/22  bullets are mostly links
+    14/22  have a > blockquote summary
+    12/22  put ": description" on most links
+    10/22  have prose outside the bullets
+     6/22  use ### subsections
+     3/22  have an ## Optional section
+
+The files that read best were the ones closest to the spec — a title, a summary, and grouped
+link lines with short notes. The weakest were the ones that abandoned the link-list form for
+pages of marketing prose, which is a sitemap's job done badly. Hence rule 1.
