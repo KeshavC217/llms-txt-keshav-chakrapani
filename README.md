@@ -126,7 +126,9 @@ targets, which this deliberately does not do.
 
 A client-rendered page yields nothing, and says so rather than pretending: `docs.convex.dev`
 returns a 4 KB shell with one anchor, and the output states that the links need JavaScript that a
-single fetch does not run.
+single fetch does not run. That claim needs positive evidence - a script and an empty element for it
+to mount into. Inferring it from "no links and little text" alone was wrong in both senses: it is
+true of `example.com`, which is a complete page with nothing to link to.
 
 The URL is normalized first (a bare hostname gets `https://`; a non-http scheme is rejected
 rather than defaulted, since prefixing `https://` onto `ftp://example.com` produces

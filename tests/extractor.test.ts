@@ -5,6 +5,7 @@ import { extract, render } from "../lib/naiveExtractor.ts";
 import { parseLlmsTxt, validateLlmsTxt } from "../lib/spec.ts";
 import {
   APP_SHELL,
+  TINY_PAGE,
   CHROME_HEAVY,
   DOCS_SITE,
   HOSTILE_PAGE,
@@ -109,6 +110,25 @@ test("an application shell is reported as one, not as an empty site", () => {
   const extraction = at(APP_SHELL, "https://docs.convex.dev/");
   assert.equal(extraction.clientRendered, true);
   assert.match(render(extraction, "https://docs.convex.dev/"), /added by JavaScript/);
+});
+
+test("a small complete page is not mistaken for an application shell", () => {
+  // The case the first version got wrong in production: example.com has one
+  // off-site link and four sentences, which reads as "no links and little
+  // text" - true of a shell, and equally true of a page with nothing on it.
+  const extraction = at(TINY_PAGE, "https://example.com/");
+  assert.equal(extraction.clientRendered, false);
+
+  const output = render(extraction, "https://example.com/");
+  assert.doesNotMatch(output, /JavaScript/);
+  assert.match(output, /No links to other pages/);
+});
+
+test("a page with no links but plenty of script is a shell", () => {
+  // Both halves are required: script alone is every page on the web, and an
+  // empty mount element alone could be an empty sidebar.
+  const scriptOnly = `<!doctype html><html><head><title>T</title></head><body><p>Some words here.</p><script src="/a.js"></script></body></html>`;
+  assert.equal(at(scriptOnly, "https://example.com/").clientRendered, false);
 });
 
 test("an icon-only anchor is named from its path", () => {
