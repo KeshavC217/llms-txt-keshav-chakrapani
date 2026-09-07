@@ -2,12 +2,12 @@ import { NextResponse } from "next/server";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
-import { buildLlmsTxt } from "@/lib/llmsTxt";
+import { buildLlmsTxt } from "@/lib/naiveExtractor";
 
 /**
  * Fetches the URL the user typed and builds an llms.txt out of that single
- * response — its title and description, the same-site links it points at, and
- * its own text. Nothing beyond this one request is fetched.
+ * response, following TEMPLATE.txt. Nothing beyond this one request is
+ * fetched; see lib/naiveExtractor.ts for what is inferred from it.
  */
 
 const FETCH_TIMEOUT_MS = 15_000;

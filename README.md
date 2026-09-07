@@ -20,11 +20,14 @@ Open <http://localhost:3000> and enter a URL.
 ## How it works
 
 ```
+TEMPLATE.txt             the target shape, and the rules the extractor follows
 app/
   page.tsx               URL input, result preview, download
   api/generate/route.ts  POST { url } -> fetch -> guard -> build
 lib/
-  llmsTxt.ts             HTML -> { title, description, subpages, content } -> llms.txt
+  dom.ts                 HTML -> a small tree that can be measured
+  nlp.ts                 tokenizing, stemming, overlap, sentence splitting
+  naiveExtractor.ts      the tree -> { siteName, summary, sections } -> llms.txt
 ```
 
 `POST /api/generate` takes `{ "url": "example.com" }` and returns:
@@ -39,7 +42,9 @@ lib/
 }
 ```
 
-The generated file is:
+`TEMPLATE.txt` defines what is being aimed at, generalized from the spec at
+[llmstxt.org](https://llmstxt.org) and from 22 files sampled off
+[llmstxt.site](https://llmstxt.site). The generated file is:
 
 ```
 # Title                      og:title, then <title>, then <h1>, then the hostname
@@ -53,12 +58,39 @@ Source: https://example.com/
 ...                          the page's own text, headings and list items kept
 ```
 
-Links are deduped with fragments stripped, and asset, feed, off-host and self-links are dropped.
-Anchor text is the label, falling back to the path for icon links that carry none. A non-HTML
-response has nothing to parse, so it passes through unchanged.
+### What the extractor infers
 
-Because this is one page, its nav and "on this page" lists land in `## Content` alongside the
-prose. Separating boilerplate from body text needs a heuristic, and is the next thing to build.
+It is naive in that it sees one document: no crawl, no model, no fetching the pages it links to.
+Everything is inferred from structure and word overlap.
+
+- **Boilerplate.** Link density decides what is navigation: a nav is nearly all link text, a
+  paragraph is nearly none. Chrome is read for its *links* and discarded for its prose, so menus
+  no longer land in the body.
+- **Sections.** Links group by shared path segment, and the grouping goes a segment deeper when
+  one bucket would swallow most of the page — otherwise every documentation site collapses into a
+  single `/docs` section. Locale segments are skipped, so `/docs/en/...` is not a section called
+  "En". Names come from the page's own nav headings when one covers the group in both directions,
+  else from the segment itself.
+- **Duplicates.** URLs are canonicalized (fragment, trailing slash, `index.html`, scheme) and
+  titles compared by stemmed token overlap, so "Pricing" and "Our Pricing" collapse to the shorter.
+- **Notes.** Taken only from a container holding exactly one link — a card or list item, never a
+  nav list, whose "neighbouring text" is just the other menu entries. Anything restating its own
+  title, or reading as concatenated labels rather than prose, is dropped instead of padded out.
+- **Curation.** Capped at 25 links a section and 150 overall; single-link sections merge into the
+  catch-all. A 238-link dump of a Wikipedia article is a sitemap, which is the thing llms.txt
+  exists not to be.
+
+A non-HTML response has nothing to parse and passes through unchanged.
+
+### Known limits
+
+Most links carry no note. A single page rarely says anything about the pages it links to, and the
+template's rule is to omit rather than invent — filling that slot properly means fetching the
+targets, which this deliberately does not do.
+
+A client-rendered page yields nothing, and says so rather than pretending: `docs.convex.dev`
+returns a 4 KB shell with one anchor, and the output states that the links need JavaScript that a
+single fetch does not run.
 
 The URL is normalized first (a bare hostname gets `https://`; a non-http scheme is rejected
 rather than defaulted, since prefixing `https://` onto `ftp://example.com` produces
