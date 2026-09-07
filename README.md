@@ -2,420 +2,77 @@
 
 **Live: <https://llms-txt-keshav-chakrapani.vercel.app>**
 
-A tool that crawls a website, generates an [`llms.txt`](https://llmstxt.org) file, and keeps it
-up to date as the site changes. The crawl, extraction and sectioning are fully deterministic
-(heuristics + lightweight NLP); an optional LLM pass then copyedits the finished document.
+A tool that generates an [`llms.txt`](https://llmstxt.org) file for a website.
 
-![The generator UI](docs/screenshots/home.png)
-
-![A generated llms.txt](docs/screenshots/result.png)
-
-The deterministic core is the point. An LLM never sees a URL it can invent from, never decides
-which pages exist, and cannot emit a malformed file — it is handed a finished document and
-allowed to return a *sparse edit map*, every entry of which is validated against the known page
-set before being applied. If the edited result fails the spec validator, the deterministic
-version is served instead. The model improves wording; it cannot damage structure.
-
-## How it works
-
-1. You enter a URL in the browser.
-2. The server checks the URL is publicly reachable (see **Safety** below), reads `robots.txt`,
-   then fetches the homepage, extracts its title/description, and pulls same-origin links from it.
-3. It merges those links with the URLs in the site's `sitemap.xml` and ranks them: nav-linked
-   pages first, then other homepage links, then sitemap-only URLs (shallowest paths first — a
-   sitemap is mostly deep leaves, and spending the whole budget on
-   `/docs/reference/some/deep/leaf` while missing `/docs` produces a much worse index). Links to
-   non-HTML files, `robots.txt`-disallowed paths, and boilerplate paths (`/login`, `/cart`, …)
-   are dropped.
-4. It fetches up to 100 of those pages, at most 8 at a time, and extracts each one's title/description
-   (`<title>`/`<h1>`, `<meta name="description">`/`og:description`, falling back to the first
-   prose sentence in the page body via [`compromise`](https://github.com/spencermountain/compromise)
-   when no meta description exists). If a successfully-fetched page's visible text is suspiciously
-   short (< 200 characters after stripping scripts/styles — usually an empty SPA shell like
-   `<div id="root"></div>`, filled in by client-side JS after load), it's re-fetched with a
-   headless [Playwright](https://playwright.dev) browser (`lib/browserRender.ts`) and the render is
-   used if it actually recovers more content than the original. The same escalation covers a page
-   that bot-walls plain `fetch()` but serves a real browser.
-5. Duplicate entries are collapsed — by `<link rel="canonical">` where a page declares one, and
-   otherwise by identical title + description (so `/amenities` and `/amenities.htm` don't both
-   appear). A description shared by several pages, or identical to the site summary, is dropped:
-   it distinguishes nothing, and the spec makes descriptions optional.
-6. Titles get cleaned up: sites almost always append a boilerplate suffix to `<title>`
-   ("Foo · Cloudflare Workers docs"). Rather than guessing the brand from the hostname (which
-   breaks the moment a domain spells the brand differently than the page content does — e.g.
-   `claracars.pt` vs. the displayed "Clara Carros"), the boilerplate words are detected directly
-   from how often they recur across the *crawled titles themselves*, then stripped, so the output
-   reads like a curated `llms.txt` rather than raw `<title>` dumps.
-7. Pages are grouped into sections, in priority order:
-   1. **The site's own nav bar.** `lib/nav.ts` parses `<nav>`/`[role="navigation"]` on the
-      homepage: a top-level item with a dropdown becomes a section named after that item, with
-      every link in the dropdown as a member; a flat top-level link becomes a section covering
-      its own page plus anything nested under its path. This is the strongest signal available —
-      it's the taxonomy the site's own authors chose, in their own words, in their own order —
-      so it wins over anything we could infer from crawled content.
-   2. **Known path prefixes** (`/docs`, `/blog`, `/api`, ...) for anything the nav didn't cover
-      (locale prefixes like `/en/` are skipped when reading the path, so `/en/blog` still matches
-      `/blog`).
-   3. **Repeated path segments** — any other segment shared by ≥3 pages becomes its own section
-      (`/car/<slug>` × 4 → "Car"). This catches templated/inventory sites (e-commerce listings,
-      product pages) *before* keyword clustering, since those pages tend to repeat the same
-      marketing boilerplate ("taxes included", "in stock") which would otherwise fool clustering
-      into grouping unrelated pages together.
-   4. **Keyword clustering** (last resort) for whatever's left, using
-      [`natural`](https://github.com/NaturalNode/natural) — stemming + document-frequency, not
-      TF-IDF's top term (see note below).
-8. **Optionally**, an LLM copyedit pass (`lib/ai.ts`, via OpenRouter) runs over the finished
-   document, **fanned out into parallel calls**: one document-level call owning the title,
-   summary, intro and section names, plus one call per section chunk (max 12 pages each, 6 in
-   flight) owning only that chunk's link text. Sizing is driven by output tokens, which is what
-   actually fails: a single call for a 90-page site emitted ~5,200 completion tokens, 65% of the
-   8,000 cap, and overflowing that cap silently discarded the entire pass. Chunked, the busiest
-   call emits ~760 tokens (9%). It also means one bad provider response costs one section's
-   wording instead of the whole document. It is deliberately not allowed to write the document:
-   each call returns a sparse *edit map*
-   (reword this title, drop that description, rename this section, demote these pages to
-   `## Optional`), every entry is validated against the known page/section set before being
-   spliced in, and the result is re-checked against the spec validator — if it fails, the
-   deterministic version is served instead. So the model can improve the wording but has no path
-   to invent a URL, drop a page, or produce a malformed file.
-
-   What is deliberately *not* chunked is anything needing a whole-document view. The one genuinely
-   cross-page decision — dropping a description repeated across many pages — was moved into
-   deterministic code (step 5), so no worker needs to see the whole document to make it.
-9. You can preview the result and download it as `llms.txt`.
-
-## Safety
-
-The endpoint fetches a URL the user typed, server-side, which is an SSRF hazard: without a guard
-someone could point it at `http://169.254.169.254/` (cloud instance metadata) or an internal
-service and read the response. `lib/urlGuard.ts` resolves every host and refuses any that maps to
-a loopback, link-local, private, or CGNAT address — on the URL entered *and* on the final URL
-after redirects, since a public URL can 302 into the private range. Tests opt out via
-`ALLOW_PRIVATE_CRAWL_TARGETS=1` so they can crawl a fixture server on `127.0.0.1`.
-
-### Why document-frequency clustering, not TF-IDF top-term
-
-The obvious first instinct is "grab each page's top TF-IDF term and group by that." That's
-actually backwards: TF-IDF is designed to *downweight* words that recur across many documents —
-which is exactly the signal a shared-topic cluster needs (e.g. five blog posts that all mention
-the same technology). Grouping by top-TF-IDF-term mostly produces singletons. Instead, this
-clusters pages by finding stemmed terms that appear on at least two pages (and fewer than half of
-all pages, to exclude site-wide boilerplate/brand terms), which reliably recovers real topical
-groups — verified against a blog where it correctly grouped unrelated-looking post titles that
-all discuss the same underlying technology.
-
-### What browser rendering fixes
-
-It fixes **client-rendered content** — SPAs whose initial HTML response is an empty shell.
-Verified against a local test page whose content only appears via a `setTimeout`-driven DOM
-update: the plain-fetch version returned nothing but a `<title>`; the rendered version correctly
-recovered the real title, description, and internal nav links.
+Right now it is a **passthrough**: you enter a URL, the server fetches it, and the response body
+comes back verbatim for preview and download. There is no crawling, no extraction and no
+generation yet — this is the starting point, being built up deliberately from here.
 
 ## Setup
 
 ```bash
 npm install
-npx playwright install chromium  # one-time browser download for the render fallback
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), enter a URL (e.g. `example.com`), and click
-**Generate**. That is the whole setup — generation needs no keys and no database.
+Open <http://localhost:3000> and enter a URL.
 
-To also get persistence, change detection and the monitoring dashboard, copy `.env.example` to
-`.env`, fill in a Supabase project (apply `db/schema.sql`, then anything in `db/migrations/`) and
-a `CRON_SECRET`. Add `OPENROUTER_API_KEY` for the AI copyedit pass. Each is independent: the tool
-degrades feature by feature rather than failing.
-
-## Deployment
-
-Deployed to Vercel as a **container**, not as a serverless bundle. That is the whole reason
-`Dockerfile.vercel` exists, and the filename is not incidental: Vercel detects a file by that
-exact name, builds it, pushes it to Vercel Container Registry, and routes all traffic to it as a
-Function on Fluid compute.
-
-The container is necessary because of Playwright. A normal Vercel build traces imports to decide
-what to bundle, and Chromium is not an import — `npx playwright install` drops a ~400MB browser
-into a cache directory outside `node_modules` that no bundler will trace and no 250MB bundle
-limit would fit. Pairing `playwright-core` with a third-party serverless Chromium is the usual
-workaround, but it is not an officially supported combination and drifts on every version bump.
-Building on Microsoft's own Playwright image, which has Chromium baked in, is the boring option
-that works. The image tag and the `playwright` dependency must move together — Playwright
-refuses to drive a browser from a different release.
-
-### First deploy
-
-```bash
-npm i -g vercel
-vercel login
-vercel link --project llms-txt-<your-name>
-
-# Secrets. Everything except OPENROUTER_API_KEY is required for monitoring;
-# the generator itself runs with none of them.
-vercel env add SUPABASE_URL production
-vercel env add SUPABASE_SECRET_KEY production
-vercel env add OPENROUTER_API_KEY production
-vercel env add CRON_SECRET production      # openssl rand -hex 32
-
-# Required. Vercel routes to port 80 unless PORT is set as a *project*
-# env var — an ENV PORT line inside the Dockerfile is not enough, and
-# getting this wrong produces a deployment that builds and then 502s.
-vercel env add PORT production             # 3000
-
-vercel deploy --prod
-```
-
-Then apply `db/schema.sql` (and `db/migrations/`) to your Supabase project, and set two GitHub
-repository secrets so the monitoring workflow can reach the deployment:
-
-```bash
-gh secret set APP_URL      # https://your-app.vercel.app
-gh secret set CRON_SECRET  # the same value you gave Vercel
-```
-
-### Verifying a deployment
-
-```bash
-curl https://your-app.vercel.app/api/health
-```
-
-```json
-{ "ok": true, "browser": { "available": true, "error": null },
-  "store": { "configured": true }, "ai": { "configured": true } }
-```
-
-`browser.available` is the one worth checking. Rendering is a *fallback*: `launchBrowser()`
-returns null rather than throwing, so a deployment without a working browser degrades to
-fetch-only instead of failing every crawl. That is right at runtime and invisible at deploy time
-— a broken browser looks exactly like a site that never needed one, and the only symptom is
-quietly worse output on JS-rendered pages. CI proves Chromium launches inside the *image*; it
-cannot prove it launches inside the *host's* sandbox, where seccomp policy, `/dev/shm` and the
-memory ceiling all differ. This endpoint asks that question against the real deployment, and
-renders a page rather than only launching one, since a browser that dies on its first page would
-pass a bare launch check.
-
-### Monitoring schedule
-
-`.github/workflows/monitor.yml` calls `POST /api/refresh` hourly. GitHub Actions rather than
-Vercel Cron because Vercel's Hobby plan caps cron at once per day with ±59 minutes of jitter,
-which is too coarse to be a useful monitor. The endpoint is plain authenticated HTTP and only
-acts on sites whose `next_check_at` is due, so the cron cadence is an upper bound on
-responsiveness, not a crawl rate — and moving to Vercel Cron later is a change of caller, not of
-code.
-
-### Deploy gating
-
-CI (`.github/workflows/ci.yml`) typechecks, lints, runs unit and integration tests, builds the
-app, then builds the container image *and launches Chromium inside it* — building successfully
-proves nothing about whether the browser runs, which is the entire reason the container exists.
-The `deploy` job requires all of that to pass.
-
-It is currently an advisory gate. Making it binding means disabling Vercel's automatic Git
-deploys and running `vercel deploy --prod` from Actions with a `VERCEL_TOKEN` secret; otherwise
-Vercel's Git integration deploys in parallel with the tests and can ship a commit CI was about to
-reject. This deployment is pushed from the CLI, so the tests and the deploy are sequenced by
-hand rather than by the platform.
-
-## Testing
-
-Three layers, each answering a different question. The first two are hermetic and gate CI; the
-third ("eval") is deliberately not — it needs the live web and, optionally, an LLM judge, and it
-measures quality rather than asserting correctness.
-
-```bash
-npm test                  # unit + integration — deterministic, offline, safe to gate CI on
-npm run test:unit
-npm run test:integration
-npm run test:eval         # seeded cohort from llmstxt.site, scored against each site's own file
-npm run test:eval:site    # single random live site; quick version of the same idea
-```
-
-**Unit** (`tests/unit`) — pure functions against hand-written HTML and fixtures.
-
-**Integration** (`tests/integration`) — a real `node:http` server (`tests/helpers/fixtureServer.ts`)
-serving a small site built to exercise every branch the crawler has to get right: a nav with a
-dropdown, a sitemap listing pages the homepage never links to, a `robots.txt` `Disallow`, a PDF
-link, a `/login` link, an external link, duplicate pages at two URLs, a `rel=canonical`, a
-client-rendered SPA shell, and a page that bot-walls plain `fetch()` but serves a real browser.
-This is the layer unit tests can't reach — most real defects are in how URLs get discovered,
-filtered, ranked and budgeted, not in any single function. `api-route.test.ts` drives the actual
-route handler, including the SSRF refusals. The browser-render suite skips itself (visibly) if
-Playwright's chromium isn't installed.
-
-`ai-provider.test.ts` runs the AI pass against a **fake OpenRouter**
-(`tests/helpers/fakeOpenRouter.ts`) that reproduces how real providers actually fail — JSON
-escaped inside a string, truncation at the token cap, an empty content field after billing 8k
-tokens, prose instead of JSON, 429s, and a hard 405. This layer did not exist at first, and its
-absence is why a completely broken AI pass once shipped with a green suite: the unit tests mock
-the whole `openrouter` module (so they never see a request body), and every other integration
-test is deliberately offline. Nothing could observe the request we actually send or the response
-we actually get back.
-
-**Corpus eval** (`tests/eval/corpus.test.ts`, `npm run test:eval`) — the main
-quality gate. Every site in the [llmstxt.site](https://llmstxt.site) directory has published its
-own `llms.txt`, which makes it the closest thing to a labelled dataset this problem has: a human
-decided which pages of their site matter, and we can check how much of that we rediscovered
-without any judgment call. The eval draws a **seeded** cohort (so a score that moves is
-attributable to a code change, not a different sample), crawls them in parallel, and asserts on
-**aggregates** — one live site being down is noise; a drop in the cohort median is signal. Spec
-validity is the exception, asserted per-site, since malformed output is our bug on any input.
-
-```bash
-npm run test:eval                                   # 8 seeded sites
-EVAL_SITES=20 EVAL_SEED=7 npm run test:eval         # bigger / different cohort
-EVAL_JUDGE=1 EVAL_REPORT=eval.json npm run test:eval  # add the LLM judge, save a report
-```
-
-Getting the recall metric honest took three tries, and the failures are instructive:
-
-- **Raw recall is unusable as a gate.** One cohort site's `llms.txt` lists 11,137 URLs against a
-  100-page budget — its maximum possible score is 0.9%, so the raw number measures the size of
-  their site, not the quality of our crawl. Recall is therefore normalized by what was
-  *attainable*: reference URLs on a host we actually crawled, capped at a page budget.
-- **That cap must be a fixed constant of the benchmark, not the crawler's live
-  `MAX_CRAWL_PAGES`.** It was briefly the latter, which made the metric blind to the one thing it
-  exists to catch: a crawl capped at 5 pages still scored 80% "attainable recall" because the
-  denominator shrank with it. A benchmark whose denominator moves with the thing under test
-  cannot measure that thing.
-- **Sites that cannot be scored are excluded explicitly, not counted as 0%.** 109 of 1558
-  directory entries pair a homepage with an `llms.txt` on a different host (pinecone.io with
-  docs.pinecone.io); others link the same pages on github.com, or publish a file with no markdown
-  links at all. Each is reported with its reason.
-
-The eval also had to be taught not to manufacture its own failures: link liveness originally fired
-one unbounded `Promise.all` of ~100 HEAD requests at a single host, which made servers shed load
-with 503s. That scored one site at 26% dead links whose pages all return 200 when asked politely.
-Liveness is now bounded to 6 concurrent, and 429/5xx count as *unverifiable* rather than dead.
-
-**Single-site eval** (`tests/eval/single-site.test.ts`, `npm run test:eval:site`) — the
-quick version of the same idea against one site, useful with `RANDOM_SITE_URL` for investigating
-a specific case. It scores three ways, weakest signal last:
-
-1. **Spec validity** (hard assertion, no network or LLM) — `lib/validate.ts` checks the output is
-   a well-formed `llms.txt`: one `# Title`, no malformed link lines, no relative URLs, no
-   duplicate URLs, no empty sections. If we emit something invalid, that's a bug on any site.
-2. **Link liveness and recall** (objective, no LLM) — every URL we publish is `HEAD`ed and must
-   resolve; separately, we report what fraction of the URLs in the site's *own* published
-   `llms.txt` we independently found. Dead links are an unambiguous defect. Recall is reported
-   rather than asserted, since a hand-written `llms.txt` often lists pages no crawler can reach.
-3. **LLM judge** (`lib/judge.ts`) — a cheap model scores our output on its own merits
-   (`qualityScore`) and against the site's real `llms.txt` (`similarityScore`), and lists concrete
-   defects. It's run on **both** the deterministic and the AI-copyedited output, so the question
-   that actually matters — *does the AI pass make it better?* — is measured rather than assumed.
-   Reported by default, since one random site is a noisy signal; set `JUDGE_MIN_QUALITY` (with a
-   larger `RANDOM_SITE_COUNT`) to turn it into a real gate.
-
-```bash
-RANDOM_SITE_URL=https://example.com npm run test:eval:site   # target one site
-RANDOM_SITE_COUNT=5 JUDGE_MIN_QUALITY=6 npm run test:eval:site
-```
-
-Why the judge isn't the primary signal: "similar to one hand-authored example" isn't ground truth
-— two good `llms.txt` files for the same site can organize it completely differently. Validity,
-liveness and recall are checkable facts, so they gate; the judge informs.
-
-## Known limitations (by design, for this pass)
-
-- Browser rendering only kicks in for thin/empty initial HTML or a failed fetch — it doesn't wait
-  for arbitrary client-side interactions (clicking "load more", infinite scroll, auth walls)
-  beyond a page's normal load.
-- Keyword clustering is lexical, not semantic — it groups pages that share literal vocabulary, so
-  a taxonomy that requires real-world knowledge (e.g. knowing "Workers" and "Durable Objects" are
-  both "serverless compute" without either page saying so) is out of reach without an
-  embeddings/LLM step.
-- Nav extraction only sees the homepage's nav bar; a site whose meaningful nav only appears on
-  interior pages (e.g. a docs sidebar not present on the marketing homepage) falls back to the
-  path/keyword heuristics.
-- Crawling is one level deep from the homepage plus the sitemap — it doesn't recursively follow
-  interior links.
-- The SSRF guard resolves DNS once, so it doesn't close DNS rebinding (a name that resolves
-  public here and private when `fetch` re-resolves it). The post-redirect check means an attacker
-  can't read an internal response body, which is the part that leaks; fully closing it needs
-  pinned-IP dialing.
-- Tracking is anonymous and unauthenticated. A per-deployment cap (`MAX_TRACKED_SITES`,
-  default 100) and a floor on check frequency (`MIN_CHECK_INTERVAL_HOURS`, default 6) are the
-  only things stopping one person queueing a thousand sites for the crawler to hit. That is a
-  cap, not auth, and real multi-tenant use would need accounts.
-- Requests to a host are paced (`CRAWL_MIN_REQUEST_INTERVAL_MS`, default 120ms) and back off
-  automatically on 429/503, honouring `Retry-After`. The backoff is permanent for the rest of the
-  crawl rather than per-request: a server that just said "too fast" will say it again if the other
-  in-flight workers keep the old rate. This costs real time — beeclue.com goes from ~9s to ~16s —
-  and it is worth it, since bounded concurrency alone still means 8 simultaneous requests to one
-  host sustained across a hundred pages.
-- Crawl is capped at 100 pages per site (`MAX_CRAWL_PAGES`) at concurrency 8
-  (`MAX_CRAWL_CONCURRENCY`), with a 60s overall timeout. Measured against beeclue.com, whose own
-  published `llms.txt` lists 91 URLs: a 20-page cap gave 20% URL recall in 2.1s, 100 pages gives
-  97% in ~4s.
-- The spec validator is stricter than real-world practice in one respect: it rejects `###`
-  subsections, which published files do use (beeclue.com's has nine). Our generator never emits
-  them, so this only matters if you point the validator at someone else's file.
-
-## Project structure
+## How it works
 
 ```
 app/
-  page.tsx              Main UI: URL input, generate button, result preview, download
-  api/generate/route.ts POST endpoint that runs the crawl + build pipeline
-  api/sites/route.ts    Track/list/untrack monitored sites; snapshot history
-  api/refresh/route.ts  Authenticated re-crawl of due sites, for the scheduler
-  api/health/route.ts   Deployment diagnostics: is the browser/store/AI actually live
-lib/
-  crawler.ts            Discovery + fetch: robots, sitemap, ranking, dedupe, bounded concurrency
-  extract.ts            Title/description/canonical/link extraction, incl. prose fallback
-  browserRender.ts      Headless-browser fallback for thin/JS-rendered/bot-walled pages
-  robots.txt            (lib/robots.ts) Minimal robots.txt matcher
-  urlGuard.ts           SSRF guard: refuses non-public hosts
-  nav.ts                Extracts the site's own nav-bar taxonomy for sectioning
-  nlp.ts                Title cleanup + keyword-based section clustering (fallback)
-  buildLlmsTxt.ts       Formats crawl results into the llms.txt spec structure
-  validate.ts           Structural llms.txt validator (used in tests and as an AI-output gate)
-  openrouter.ts         OpenRouter client: JSON extraction, retry, timeouts
-  ai.ts                 Optional LLM copyedit pass (sparse, validated edit map)
-  judge.ts              LLM-as-judge scoring, for the evals only
-  generate.ts           The pipeline shared by every entry point (UI, cron, tests)
-  parse.ts              Parses an llms.txt back into structure, for diffing
-  diff.ts               Structural diff between two snapshots + a human summary
-  store.ts              Supabase persistence: tracked sites, snapshots, scheduling
-  rateLimit.ts          Per-host request pacing with automatic 429/503 backoff
-  types.ts              Shared types
-db/
-  schema.sql            Tables, indexes, RLS
-  migrations/           Incremental changes to apply on top of an existing schema
-tests/
-  unit/                 Pure functions
-  helpers/              Fixture site, fake OpenRouter, shared eval metrics
-  integration/          Whole pipeline + API route against the fixture server (offline)
-  eval/                 Real sites scored against their own published llms.txt
-                          corpus.test.ts       seeded cohort from llmstxt.site (the quality gate)
-                          single-site.test.ts  one site, for investigating a specific case
+  page.tsx               URL input, result preview, download
+  api/generate/route.ts  POST { url } -> fetch -> { llmsTxt, status, contentType }
 ```
+
+`POST /api/generate` takes `{ "url": "example.com" }` and returns:
+
+```json
+{
+  "url": "https://example.com/",
+  "status": 200,
+  "contentType": "text/html; charset=utf-8",
+  "truncated": false,
+  "llmsTxt": "<!doctype html>..."
+}
+```
+
+The URL is normalized first (a bare hostname gets `https://`; a non-http scheme is rejected
+rather than defaulted, since prefixing `https://` onto `ftp://example.com` produces
+`https://ftp://example.com`, which `URL` happily parses with the host `ftp`).
+
+Responses are capped at 2 MB and the fetch times out after 15s.
+
+### The one guard
+
+`assertPublicUrl` refuses URLs resolving to a loopback, link-local, private or CGNAT address,
+and re-checks the final URL after redirects.
+
+This is deliberate rather than left over. The endpoint fetches a user-supplied URL server-side
+and returns the body, so without it the deployed app is an open proxy into anything the function
+can reach — `http://169.254.169.254/` (cloud instance metadata) included. A public URL can also
+`302` into the private range, which is why the post-redirect check exists.
+
+Set `ALLOW_PRIVATE_CRAWL_TARGETS=1` to bypass it when testing against a local server.
 
 ## Environment
 
-See `.env.example` for the annotated version. Nothing here is required to generate an
-`llms.txt` — without Supabase the tool works, it just cannot remember or monitor anything.
+Nothing is required to run the passthrough. `.env.example` documents the variables the fuller
+version will use as it gets rebuilt (Supabase for persistence, OpenRouter for an LLM pass, a cron
+secret for scheduled updates).
 
+## Deployment
+
+Deployed to Vercel as a standard Next.js app; `vercel deploy --prod` from the project root.
+
+## History
+
+The full implementation — crawler with sitemap/robots/nav parsing, headless-browser fallback for
+JS-rendered pages, deterministic sectioning, a constrained LLM copyedit pass, Supabase
+persistence, change detection and scheduled re-crawls — is preserved at the tag
+[`v1-full-generator`](https://github.com/KeshavC217/llms-txt-keshav-chakrapani/releases/tag/v1-full-generator).
+
+```bash
+git show v1-full-generator:lib/crawler.ts   # read a file from it
+git diff v1-full-generator                  # what was removed
 ```
-OPENROUTER_API_KEY       enables the AI copyedit pass and the eval's judge
-OPENROUTER_MODEL         override the model (default: google/gemma-4-31b-it)
-
-SUPABASE_URL             required for persistence + monitoring
-SUPABASE_SECRET_KEY      server-only secret key (sb_secret_...); never NEXT_PUBLIC_
-CRON_SECRET              shared secret required by /api/refresh
-
-PORT                     3000 — required on Vercel, which otherwise routes to :80
-BROWSER_WS_ENDPOINT      connect to a remote browser over CDP instead of launching one
-PLAYWRIGHT_EXECUTABLE_PATH  launch a Chromium from outside Playwright's cache
-
-MAX_CRAWL_PAGES          page budget per crawl (default: 100)
-MAX_CRAWL_CONCURRENCY    parallel fetches (default: 8)
-MAX_CRAWL_RENDERS        browser-render budget per crawl (default: 30)
-MAX_TRACKED_SITES        cap on monitored sites (default: 100)
-MIN_CHECK_INTERVAL_HOURS floor on monitoring frequency (default: 6)
-GENERATE_CACHE_MAX_AGE_MS  how long a stored snapshot is served (default: 15m)
-```
-
-The browser is chosen by environment rather than by code, so changing hosts is configuration:
-`BROWSER_WS_ENDPOINT` connects to a remote browser (Browserless, Browserbase), 
-`PLAYWRIGHT_EXECUTABLE_PATH` points at a Chromium living outside Playwright's cache, and neither
-set launches the bundled one.

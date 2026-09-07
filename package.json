@@ -7,35 +7,21 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run tests/unit tests/integration",
-    "test:unit": "vitest run tests/unit",
-    "test:integration": "vitest run tests/integration",
-    "test:eval": "vitest run tests/eval/corpus.test.ts",
-    "test:eval:site": "vitest run tests/eval/single-site.test.ts",
-    "test:all": "vitest run",
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.115.0",
-    "cheerio": "^1.2.0",
-    "compromise": "^14.16.0",
-    "natural": "^8.1.1",
     "next": "16.3.4",
-    "playwright": "^1.62.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/natural": "^5.1.5",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "domhandler": "^6.0.1",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
     "tailwindcss": "^4",
-    "typescript": "^5",
-    "vitest": "^4.1.11"
+    "typescript": "^5"
   }
 }
