@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 24 ships npm 11, the version that writes package-lock.json here.
+          # An older npm builds a different tree for the wasm fallback deps
+          # and then rejects the lock it did not write.
+          node-version: 24
+          cache: npm
+
+      # A full install, not --omit=dev: `typecheck` runs `next typegen` first,
+      # and the generated route types (LayoutProps<"/">) need the real toolchain.
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
