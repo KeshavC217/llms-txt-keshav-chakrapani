@@ -20,6 +20,15 @@ process.env.OPENROUTER_API_KEY = "test-key";
 // fixture request would just make it slow. tests/integration/pipeline.test.ts
 // asserts the real interval.
 process.env.CRAWL_MIN_REQUEST_INTERVAL_MS = "0";
+// The route answers from the stored snapshot when one is recent enough, which
+// makes this file poison itself: the first generate() persists a snapshot, and
+// every later case is served from it without ever reaching the fake provider —
+// so the request-shape assertions see zero requests and aiStatus reports
+// whatever the *cached* run did. It only bites when a developer has Supabase
+// configured, so CI (which has no SUPABASE_URL) stayed green while `npm test`
+// failed 9 cases on the machine of anyone who followed the README. Each case
+// here is meant to be a fresh crawl, so the cache is off for the whole file.
+process.env.GENERATE_CACHE_MAX_AGE_MS = "0";
 
 let fake: FakeOpenRouter;
 let site: FixtureServer;
