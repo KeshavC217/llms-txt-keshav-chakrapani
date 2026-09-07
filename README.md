@@ -207,9 +207,11 @@ Merging deploys to production.
 on push regardless of CI, so a red check can sit next to a working preview — production is what
 the protection gates.
 
-CI pins Node 24 to match the npm that writes `package-lock.json`. npm 10 and npm 11 lay out the
-wasm fallback dependencies differently, and `npm ci` rejects a lock file whose layout is not the
-one it would have built.
+CI pins Node 24, and pins npm to the exact version that writes `package-lock.json`. npm decides how
+the wasm fallback dependencies are laid out in the lock file, and `npm ci` rejects a layout it would
+not have written. Pinning Node alone is not enough, because its bundled npm moves with patch
+releases - a lock written by 11.6.2 met a runner carrying 11.19.1 and the install failed. Regenerate
+the lock with `npx npm@11.19.1 install`, matching the version in `ci.yml`.
 
 ## History
 

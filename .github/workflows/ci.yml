@@ -13,11 +13,17 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # 24 ships npm 11, the version that writes package-lock.json here.
-          # An older npm builds a different tree for the wasm fallback deps
-          # and then rejects the lock it did not write.
+          # Also what runs the tests: node --test executes the .ts files
+          # directly, which needs Node's built-in type stripping.
           node-version: 24
           cache: npm
+
+      # npm's own version decides how the wasm fallback dependencies
+      # (@emnapi/*, under @tailwindcss/oxide and @unrs/resolver) are laid out in
+      # the lock file, and `npm ci` rejects a layout it would not have written.
+      # Pinning Node is not enough: its bundled npm moves with patch releases,
+      # which is how a lock written by 11.6.2 met a runner holding 11.19.1.
+      - run: npm i -g npm@11.19.1
 
       # A full install, not --omit=dev: `typecheck` runs `next typegen` first,
       # and the generated route types (LayoutProps<"/">) need the real toolchain.
