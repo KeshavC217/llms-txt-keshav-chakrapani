@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
+import { buildLlmsTxt } from "@/lib/llmsTxt";
+
 /**
- * Passthrough: fetch the URL the user typed and hand back the response body
- * verbatim. No crawling, no parsing, no generation — this is the starting
- * point to build a real generator on top of.
+ * Fetches the URL the user typed and builds an llms.txt out of that single
+ * response — its title and description, the same-site links it points at, and
+ * its own text. Nothing beyond this one request is fetched.
  */
 
 const FETCH_TIMEOUT_MS = 15_000;
@@ -109,13 +111,21 @@ export async function POST(request: Request) {
     // actually landed on has to be checked too.
     await assertPublicUrl(response.url || url);
 
-    const text = await response.text();
+    const contentType = response.headers.get("content-type");
+    const raw = await response.text();
+    const page = raw.slice(0, MAX_BYTES);
+    const finalUrl = response.url || url;
+
+    // Only HTML has a title, links and prose to pull apart. Anything else
+    // (a text file, JSON) has nothing to parse, so it passes through as-is.
+    const isHtml = /html/i.test(contentType ?? "") || /^\s*<(!doctype|html)/i.test(page);
+
     return NextResponse.json({
-      url: response.url || url,
+      url: finalUrl,
       status: response.status,
-      contentType: response.headers.get("content-type"),
-      truncated: text.length > MAX_BYTES,
-      llmsTxt: text.slice(0, MAX_BYTES),
+      contentType,
+      truncated: raw.length > MAX_BYTES,
+      llmsTxt: isHtml ? buildLlmsTxt(page, finalUrl) : page,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not fetch that URL.";

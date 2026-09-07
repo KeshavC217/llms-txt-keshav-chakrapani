@@ -52,7 +52,7 @@ export default function Home() {
     <main className="mx-auto w-full max-w-3xl px-6 py-16">
       <h1 className="text-3xl font-bold tracking-tight">llms.txt Generator</h1>
       <p className="mt-2 text-sm text-neutral-500">
-        Fetches the URL and returns the response body as-is. A passthrough, for now.
+        Builds an llms.txt from a single page: its title, the pages it links to, and its text.
       </p>
 
       <form onSubmit={generate} className="mt-8 flex gap-3">

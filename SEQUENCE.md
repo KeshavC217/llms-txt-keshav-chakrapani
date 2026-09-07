@@ -1,0 +1,2 @@
+1. Built the llms.txt from the single fetched page only — `lib/llmsTxt.ts` pulls the title/description, the same-site links as subpages, and the page's own text, and `/api/generate` now returns that rendered template instead of the raw body.
+2. Made the GitHub repo public after checking the full history for committed secrets (only `.env.example` was ever tracked, no secret-shaped strings), which also unlocks branch protection on the free plan.

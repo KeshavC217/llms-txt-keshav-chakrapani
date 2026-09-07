@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # A full install, not --omit=dev: `typecheck` runs `next typegen` first,
+      # and the generated route types (LayoutProps<"/">) need the real toolchain.
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
