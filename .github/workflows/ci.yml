@@ -13,7 +13,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # 24 ships npm 11, the version that writes package-lock.json here.
+          # An older npm builds a different tree for the wasm fallback deps
+          # and then rejects the lock it did not write.
+          node-version: 24
           cache: npm
 
       # A full install, not --omit=dev: `typecheck` runs `next typegen` first,
