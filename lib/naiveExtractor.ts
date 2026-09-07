@@ -459,6 +459,34 @@ function chooseDepth(all: string[][]): number {
   return deep.length >= 5 && largest >= 0.6 * deep.length && deeper > shallow ? 1 : 0;
 }
 
+/**
+ * Whether the page is a shell that builds itself in the browser.
+ *
+ * Absence is not evidence: "no links and little text" is equally true of a
+ * small finished page - example.com has one off-site link and four sentences,
+ * and was being reported as an application shell. So this asks for something
+ * positive instead. A shell ships JavaScript and an empty element for it to
+ * mount into; a page that carries neither is simply a page with nothing on it,
+ * and saying so is the more useful of the two answers.
+ */
+function looksClientRendered(root: ElementNode, linkCount: number): boolean {
+  if (linkCount > 0) return false;
+  if (cleanText(root).length > 1500) return false;
+
+  const elements = [...walk(root)];
+  const hasScript = elements.some((node) => node.tag === "script");
+  if (!hasScript) return false;
+
+  // An empty container is what a framework mounts into: <div id="root"></div>,
+  // <div id="__next">, <div id="__docusaurus">.
+  return elements.some(
+    (node) =>
+      ["div", "main", "section"].includes(node.tag) &&
+      Boolean(node.attrs.id) &&
+      cleanText(node).length === 0,
+  );
+}
+
 /** Absolute form of an href, or nothing when it will not parse. */
 function resolve(href: string | undefined, base: URL): string | undefined {
   if (!href) return undefined;
@@ -520,7 +548,7 @@ export function extract(html: string, url: string): Extraction {
   return {
     siteName,
     summary,
-    clientRendered: links.size === 0 && cleanText(root).length < 1500,
+    clientRendered: looksClientRendered(root, links.size),
     markdownAlternate: resolve(linkRel(root, "alternate", "text/markdown"), base),
     existingLlmsTxt: resolve(linkRel(root, "describedby"), base),
     prose: proseOf(main, summary),

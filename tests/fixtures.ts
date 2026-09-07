@@ -92,6 +92,20 @@ export const APP_SHELL = wrap(
 );
 
 /**
+ * A small, complete, server-rendered page with nothing to link to - the shape
+ * of example.com. It has no internal links and little text, which is exactly
+ * what a JavaScript shell looks like from the outside, and it is not one.
+ */
+export const TINY_PAGE = wrap(
+  `<title>Example Domain</title>`,
+  `<div>
+     <h1>Example Domain</h1>
+     <p>This domain is for use in documentation examples without needing permission.</p>
+     <p><a href="https://www.iana.org/domains/example">Learn more</a></p>
+   </div>`,
+);
+
+/**
  * Locale-prefixed paths. /docs/en/... must not produce a section called "En".
  */
 export const LOCALE_SITE = wrap(
