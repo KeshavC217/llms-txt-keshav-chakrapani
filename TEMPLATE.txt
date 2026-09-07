@@ -81,6 +81,33 @@ SLOTS
                          3/22 sampled files used it. Never invent other reserved names.
 
 
+CONFORMANCE
+-----------
+
+The structure above is not a preference; it is the grammar at https://llmstxt.org, which fixes
+both the parts and their order:
+
+    optional BOM
+    H1 with the name of the project or site      <- the only required part
+    blockquote with a short summary
+    zero or more markdown sections, any type EXCEPT headings
+    zero or more H2-delimited sections, each containing a "file list":
+        list items with a required [name](url), then optionally ": notes"
+
+Which means, concretely:
+
+  - Exactly one H1, and it comes first. Nothing precedes it.
+  - No heading deeper than H2. There is no H3 in the grammar.
+  - A section contains list items and nothing else. Prose inside a section is invalid.
+  - Every list item carries a hyperlink. A bare bullet is invalid.
+  - Values are escaped on the way out: a "]" in a title, a "(" in a URL, a newline in a note, or
+    a paragraph beginning "##" would each otherwise produce a file that no longer parses.
+
+`lib/spec.ts` implements this grammar in both directions - escaping to make output conform, and
+parsing to prove it did. `npm test` checks the spec's own example, a set of files that must be
+rejected, and hostile pages run through the real pipeline; CI runs it on every PR.
+
+
 RULES
 -----
 

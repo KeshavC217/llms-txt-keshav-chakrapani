@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
-import { buildLlmsTxt } from "@/lib/naiveExtractor";
+import { extract, render } from "@/lib/naiveExtractor";
+import { validateLlmsTxt } from "@/lib/spec";
 
 /**
  * Fetches the URL the user typed and builds an llms.txt out of that single
@@ -120,12 +121,31 @@ export async function POST(request: Request) {
     // (a text file, JSON) has nothing to parse, so it passes through as-is.
     const isHtml = /html/i.test(contentType ?? "") || /^\s*<(!doctype|html)/i.test(page);
 
+    if (!isHtml) {
+      return NextResponse.json({
+        url: finalUrl,
+        status: response.status,
+        contentType,
+        truncated: raw.length > MAX_BYTES,
+        llmsTxt: page,
+      });
+    }
+
+    const extraction = extract(page, finalUrl);
+    const llmsTxt = render(extraction, finalUrl);
+    const issues = validateLlmsTxt(llmsTxt);
+
     return NextResponse.json({
       url: finalUrl,
       status: response.status,
       contentType,
       truncated: raw.length > MAX_BYTES,
-      llmsTxt: isHtml ? buildLlmsTxt(page, finalUrl) : page,
+      llmsTxt,
+      // Checked on the way out rather than asserted in a comment: the file we
+      // just built is parsed back against the grammar at llmstxt.org.
+      spec: { valid: issues.length === 0, issues },
+      markdownAlternate: extraction.markdownAlternate,
+      existingLlmsTxt: extraction.existingLlmsTxt,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not fetch that URL.";

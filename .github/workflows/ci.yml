@@ -26,3 +26,8 @@ jobs:
       - run: npm run lint
 
       - run: npm run typecheck
+
+      # Includes the conformance suite: what the generator emits is parsed back
+      # against the grammar at https://llmstxt.org, so the claim that it follows
+      # the spec is checked rather than asserted in a comment.
+      - run: npm test

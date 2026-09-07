@@ -10,7 +10,9 @@
  */
 
 import {
-  ElementNode,
+  // `type` inline, not just in tsconfig: Node strips types when it runs these
+  // files directly and cannot otherwise tell an interface from a value.
+  type ElementNode,
   ancestors,
   attrsOf,
   cleanText,
@@ -18,8 +20,9 @@ import {
   linkDensity,
   parseHtml,
   walk,
-} from "./dom";
-import { coverage, humanize, sentences, similarity, stripBrandSuffix, titleCase } from "./nlp";
+} from "./dom.ts";
+import { coverage, humanize, sentences, similarity, stripBrandSuffix, titleCase } from "./nlp.ts";
+import { escapeBlock, escapeInline, escapeLinkText, escapeUrl } from "./spec.ts";
 
 export interface LinkEntry {
   url: string;
@@ -40,6 +43,16 @@ export interface Extraction {
   optional: LinkEntry[];
   /** The page arrived as a near-empty shell that builds itself in the browser. */
   clientRendered: boolean;
+  /**
+   * The spec asks that links point at LLM-friendly content, and that pages
+   * advertise it: rel="alternate" type="text/markdown" for a markdown twin,
+   * rel="describedby" for the llms.txt already covering the page. Both are
+   * reported rather than acted on - a markdown twin for this one page says
+   * nothing verifiable about the pages it links to, and inventing .md URLs we
+   * have not fetched would be guessing.
+   */
+  markdownAlternate?: string;
+  existingLlmsTxt?: string;
 }
 
 /** Chrome that is navigation or furniture, never content. */
@@ -118,6 +131,18 @@ function findMain(root: ElementNode): ElementNode {
   return best;
 }
 
+/** href of the first <link> carrying every one of the given attributes. */
+function linkRel(root: ElementNode, rel: string, type?: string): string | undefined {
+  for (const element of walk(root)) {
+    if (element.tag !== "link") continue;
+    const rels = (element.attrs.rel ?? "").toLowerCase().split(/\s+/);
+    if (!rels.includes(rel)) continue;
+    if (type && (element.attrs.type ?? "").toLowerCase() !== type) continue;
+    if (element.attrs.href) return element.attrs.href;
+  }
+  return undefined;
+}
+
 function metaContent(root: ElementNode, names: string[]): string | undefined {
   for (const name of names) {
     for (const element of walk(root)) {
@@ -175,6 +200,19 @@ function summaryOf(root: ElementNode, main: ElementNode, siteName: string): stri
 }
 
 /**
+ * True for a paragraph sitting in a card beside a single link: that text
+ * describes the link and is already used as its note, so repeating it as
+ * orienting prose says the same thing twice in two places.
+ */
+function describesOneLink(paragraph: ElementNode): boolean {
+  const container = paragraph.parent;
+  if (!container) return false;
+
+  const links = [...walk(container)].filter((node) => node.tag === "a" && node.attrs.href);
+  return links.length === 1 && cleanText(container).length <= 400;
+}
+
+/**
  * Orienting paragraphs: what a reader needs before the link lists make sense.
  * Kept deliberately short, and skipped entirely when it would only echo the
  * summary - the template asks for omission over padding.
@@ -185,6 +223,7 @@ function proseOf(main: ElementNode, summary: string | undefined): string[] {
   for (const element of walk(main)) {
     if (element.tag !== "p" || inChrome(element)) continue;
     if (linkDensity(element) > 0.5) continue;
+    if (describesOneLink(element)) continue;
 
     const text = cleanText(element);
     if (text.length < 60 || text.split(/\s+/).length < 12) continue;
@@ -293,7 +332,14 @@ function collectLinks(
 
     const anchorText = cleanText(anchor);
     const segments = url.pathname.split("/").filter(Boolean).filter((segment) => !LOCALE_SEGMENT.test(segment));
-    const slug = segments[segments.length - 1] ?? "";
+    // A slug reaches us percent-encoded; humanizing it raw yields "B%20c".
+    const rawSlug = segments[segments.length - 1] ?? "";
+    let slug = rawSlug;
+    try {
+      slug = decodeURIComponent(rawSlug);
+    } catch {
+      // Malformed escape sequence: the raw slug is the better of two bad names.
+    }
 
     // Anchor text when it names the page; the slug when it is an icon, a bare
     // arrow, or boilerplate like "read more" (rule: {{link_title}}).
@@ -305,11 +351,20 @@ function collectLinks(
     const title = usable ? anchorText : humanize(slug) || anchorText || url.pathname;
     if (!title) continue;
 
+    // Rule 3: the same page twice keeps the shorter, plainer title - but the
+    // copies are merged rather than one discarded. A page usually appears once
+    // in the nav, bare, and once in a card that describes it; keeping only the
+    // first loses the description, and keeping only the second loses the name.
+    const note = noteFor(anchor, title, pageTitles);
     const existing = found.get(key);
-    // Rule 3: the same page twice keeps the shorter, plainer title.
-    if (existing && existing.entry.title.length <= title.length) continue;
 
-    found.set(key, { entry: { url: key, title, note: noteFor(anchor, title, pageTitles) }, segments });
+    if (existing) {
+      existing.entry.title = existing.entry.title.length <= title.length ? existing.entry.title : title;
+      existing.entry.note ??= note;
+      continue;
+    }
+
+    found.set(key, { entry: { url: key, title, note }, segments });
   }
   return found;
 }
@@ -319,15 +374,24 @@ function collectLinks(
  * a group of links, else the path segment they share. Never a fixed list -
  * across the sampled files, section names were almost entirely site-specific.
  */
-function labelForGroup(root: ElementNode, group: string, urls: Set<string>, base: URL): string {
+function labelForGroup(
+  root: ElementNode,
+  group: string,
+  urls: Set<string>,
+  base: URL,
+  siteName: string,
+): string {
   if (!group) return "Pages";
 
   let best: string | undefined;
   for (const element of walk(root)) {
-    if (!/^(h[1-6]|summary|strong|legend|button)$/.test(element.tag)) continue;
+    // h1 is excluded: it names the page, and a section named after the whole
+    // page ("## Thornbury & Co") tells a reader nothing.
+    if (!/^(h[2-6]|summary|strong|legend|button)$/.test(element.tag)) continue;
 
     const label = cleanText(element);
     if (!label || label.length > 40 || GENERIC_LABEL.test(label)) continue;
+    if (similarity(label, siteName) > 0.5) continue;
 
     // Does this heading sit above a block whose links are mostly this group?
     const container = element.parent;
@@ -353,7 +417,7 @@ function labelForGroup(root: ElementNode, group: string, urls: Set<string>, base
   // Nav labels are written as instructions to a visitor ("Explore Services
   // Pages"); a section name only wants the noun.
   const label = (best ?? humanize(group))
-    .replace(/^(explore|browse|view|see|discover|all|our|the)\s+/i, "")
+    .replace(/^(?:(?:explore|browse|view|see|discover|all|our|the)\s+)+/i, "")
     .replace(/\s+(pages?|links?|menu|section|navigation)$/i, "")
     .trim();
 
@@ -375,7 +439,15 @@ function groupKeyFor(segments: string[], depth: number): string {
 
 function chooseDepth(all: string[][]): number {
   const deep = all.filter((segments) => segments.length > 1);
-  if (deep.length < 5) return 0;
+  if (deep.length === 0) return 0;
+
+  const groupCount = (depth: number) => new Set(deep.map((segments) => groupKeyFor(segments, depth))).size;
+  const shallow = groupCount(0);
+  const deeper = groupCount(1);
+
+  // One bucket holding everything is not a grouping at all; if going a segment
+  // deeper actually separates the links, take it however few there are.
+  if (shallow <= 1 && deeper > 1) return 1;
 
   const counts = new Map<string, number>();
   for (const segments of deep) {
@@ -384,7 +456,17 @@ function chooseDepth(all: string[][]): number {
   }
 
   const largest = Math.max(...counts.values());
-  return largest >= 0.6 * deep.length ? 1 : 0;
+  return deep.length >= 5 && largest >= 0.6 * deep.length && deeper > shallow ? 1 : 0;
+}
+
+/** Absolute form of an href, or nothing when it will not parse. */
+function resolve(href: string | undefined, base: URL): string | undefined {
+  if (!href) return undefined;
+  try {
+    return new URL(href, base).toString();
+  } catch {
+    return undefined;
+  }
 }
 
 export function extract(html: string, url: string): Extraction {
@@ -427,7 +509,7 @@ export function extract(html: string, url: string): Extraction {
 
     if (deduped.length === 0) continue; // Rule 6: empty sections are dropped.
     sections.push({
-      name: labelForGroup(root, group, new Set(deduped.map((entry) => entry.url)), base),
+      name: labelForGroup(root, group, new Set(deduped.map((entry) => entry.url)), base, siteName),
       links: deduped,
     });
   }
@@ -439,6 +521,8 @@ export function extract(html: string, url: string): Extraction {
     siteName,
     summary,
     clientRendered: links.size === 0 && cleanText(root).length < 1500,
+    markdownAlternate: resolve(linkRel(root, "alternate", "text/markdown"), base),
+    existingLlmsTxt: resolve(linkRel(root, "describedby"), base),
     prose: proseOf(main, summary),
     sections: curate(sections),
     optional: optional.slice(0, MAX_LINKS_PER_SECTION),
@@ -478,18 +562,26 @@ function curate(sections: Section[]): Section[] {
   return result;
 }
 
-/** Renders the extraction in the order TEMPLATE.txt fixes. */
+/**
+ * Renders in the order https://llmstxt.org fixes: H1, blockquote summary,
+ * non-heading detail, then H2 sections of file lists. Every value is escaped
+ * on the way out, so a page whose title contains a bracket cannot produce a
+ * file that no longer parses.
+ */
 export function render(extraction: Extraction, url: string): string {
-  const out: string[] = [`# ${extraction.siteName}`, ""];
+  const out: string[] = [`# ${escapeInline(extraction.siteName) || new URL(url).hostname}`, ""];
 
-  if (extraction.summary) out.push(`> ${extraction.summary}`, "");
-  for (const paragraph of extraction.prose) out.push(paragraph, "");
+  if (extraction.summary) out.push(`> ${escapeInline(extraction.summary)}`, "");
+  for (const paragraph of extraction.prose) out.push(escapeBlock(paragraph), "");
 
-  const line = (entry: LinkEntry) =>
-    `- [${entry.title}](${entry.url})${entry.note ? `: ${entry.note}` : ""}`;
+  const line = (entry: LinkEntry) => {
+    const title = escapeLinkText(entry.title);
+    const notes = entry.note;
+    return `- [${title}](${escapeUrl(entry.url)})${notes ? `: ${escapeInline(notes)}` : ""}`;
+  };
 
   for (const section of extraction.sections) {
-    out.push(`## ${section.name}`, "", ...section.links.map(line), "");
+    out.push(`## ${escapeInline(section.name)}`, "", ...section.links.map(line), "");
   }
   if (extraction.optional.length > 0) {
     out.push("## Optional", "", ...extraction.optional.map(line), "");
@@ -499,9 +591,11 @@ export function render(extraction: Extraction, url: string): string {
     // Saying which of the two happened matters: an empty site and a page whose
     // links only exist after its JavaScript runs need different fixes.
     out.push(
-      extraction.clientRendered
-        ? `_${url} returned an application shell; its links are added by JavaScript, which a single fetch does not run._`
-        : `_No links to other pages were found on ${url}._`,
+      escapeBlock(
+        extraction.clientRendered
+          ? `_${url} returned an application shell; its links are added by JavaScript, which a single fetch does not run._`
+          : `_No links to other pages were found on ${url}._`,
+      ),
       "",
     );
   }

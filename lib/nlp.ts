@@ -22,17 +22,25 @@ export function tokenize(text: string): string[] {
 }
 
 /**
- * Crude suffix stripping — enough that "integration" and "integrations" or
- * "pricing" and "price" collide when comparing titles. A real stemmer would be
- * more accurate and more machinery than this earns.
+ * Crude suffix stripping - enough that "integration" and "integrations" collide
+ * when comparing titles. It does not relate different forms of a word:
+ * "pricing" and "price" stay distinct, which a real stemmer would collapse and
+ * which has not been worth the machinery.
  */
 export function stem(word: string): string {
   if (word.length <= 3) return word;
-  for (const suffix of ["ities", "ing", "ies", "es", "s", "ed"]) {
-    if (word.endsWith(suffix) && word.length - suffix.length >= 3) {
-      const base = word.slice(0, -suffix.length);
-      return suffix === "ies" ? `${base}y` : base;
-    }
+
+  // Plurals first, and by the actual English rules: stripping a blanket "es"
+  // turns "guides" into "guid" while "guide" stays whole, so the two forms of
+  // one title stop matching - which is the whole point of stemming here.
+  if (word.endsWith("ies") && word.length > 4) {
+    return word.endsWith("ities") ? `${word.slice(0, -5)}ity` : `${word.slice(0, -3)}y`;
+  }
+  if (/(?:s|x|z|ch|sh)es$/.test(word)) return word.slice(0, -2);
+  if (word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+
+  for (const suffix of ["ing", "ed"]) {
+    if (word.endsWith(suffix) && word.length - suffix.length >= 3) return word.slice(0, -suffix.length);
   }
   return word;
 }
@@ -80,8 +88,10 @@ export function stripBrandSuffix(title: string, brand?: string): string {
   if (parts.length < 2) return title.trim();
 
   if (brand) {
-    const kept = parts.filter((part) => similarity(part, brand) < 0.6);
-    if (kept.length > 0) return kept.join(" — ");
+    // Containment, not overlap: "Acme Inc" contains the brand "Acme" but a
+    // symmetric measure scores that only 0.5, and the suffix survives.
+    const kept = parts.filter((part) => coverage(brand, part) < 0.8);
+    if (kept.length > 0) return kept.join(" - ");
   }
   return parts.reduce((longest, part) => (part.length > longest.length ? part : longest));
 }

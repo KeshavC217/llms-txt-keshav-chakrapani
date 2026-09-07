@@ -30,8 +30,12 @@ const VOID = new Set([
 /** Elements whose content is not markup, and must not be parsed as such. */
 const RAW_TEXT = new Set(["script", "style", "template", "svg", "noscript"]);
 
-/** <p><li> and friends close an open sibling of the same kind implicitly. */
-const CLOSED_BY_SIBLING: Record<string, string[]> = {
+/**
+ * Which tags implicitly close an element that is still open: keyed by the open
+ * element, valued by the tags that end it. An open <p> is ended by the next
+ * <p> or <div>; an open <li> by the next <li>.
+ */
+const CLOSED_BY: Record<string, string[]> = {
   p: ["p", "div", "section", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6"],
   li: ["li"],
   dt: ["dt", "dd"],
@@ -99,11 +103,10 @@ export function parseHtml(html: string): ElementNode {
       continue;
     }
 
-    for (const sibling of CLOSED_BY_SIBLING[tag] ?? []) {
-      if (current.tag === sibling && current.parent) {
-        current = current.parent;
-        break;
-      }
+    // Read from the open element, not from the tag being opened: <p> inside a
+    // <div> opens a child, while <p> after a <p> ends the first one.
+    if (current.parent && (CLOSED_BY[current.tag] ?? []).includes(tag)) {
+      current = current.parent;
     }
 
     const element: ElementNode = { tag, attrs: parseAttrs(rawAttrs), children: [], parent: current };

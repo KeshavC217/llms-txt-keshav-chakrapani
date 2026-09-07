@@ -8,6 +8,9 @@ interface Result {
   contentType: string | null;
   truncated: boolean;
   llmsTxt: string;
+  spec?: { valid: boolean; issues: { line: number; message: string }[] };
+  markdownAlternate?: string;
+  existingLlmsTxt?: string;
 }
 
 export default function Home() {
@@ -85,6 +88,14 @@ export default function Home() {
               HTTP {result.status} · {result.contentType ?? "unknown type"} ·{" "}
               {result.llmsTxt.length.toLocaleString()} chars
               {result.truncated && " (truncated)"}
+              {result.spec && (
+                <>
+                  {" · "}
+                  <span className={result.spec.valid ? "text-green-700 dark:text-green-500" : "text-amber-700 dark:text-amber-500"}>
+                    {result.spec.valid ? "conforms to llmstxt.org" : `${result.spec.issues.length} spec issue(s)`}
+                  </span>
+                </>
+              )}
             </p>
             <button
               onClick={download}
@@ -93,6 +104,16 @@ export default function Home() {
               Download llms.txt
             </button>
           </div>
+          {result.existingLlmsTxt && (
+            <p className="mt-3 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:bg-blue-950 dark:text-blue-300">
+              This site already publishes an llms.txt at{" "}
+              <a href={result.existingLlmsTxt} className="underline">
+                {result.existingLlmsTxt}
+              </a>
+              . Its own file is authoritative; this one is generated from a single page.
+            </p>
+          )}
+
           <pre className="mt-3 max-h-[32rem] overflow-auto rounded-lg bg-neutral-50 p-4 font-mono text-xs whitespace-pre-wrap dark:bg-neutral-900">
             {result.llmsTxt}
           </pre>
