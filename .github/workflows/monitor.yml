@@ -47,15 +47,32 @@ jobs:
             "${APP_URL%/}/api/refresh")
 
           echo "$response" | python3 -m json.tool
+
           # Surface a per-site failure in the job summary rather than burying
           # it in logs — a run where every site failed still exits 0 otherwise.
-          echo "$response" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-results = data.get('results', [])
-failed = [r for r in results if r.get('status') == 'failed']
-print(f\"### Monitoring run\n\nChecked {data.get('checked', 0)} site(s), {len(failed)} failed.\n\")
-for r in results:
-    line = r.get('changeSummary') or r.get('error') or 'no changes'
-    print(f\"- \`{r['url']}\` — {r['status']}: {line}\")
-" >> "$GITHUB_STEP_SUMMARY"
+          #
+          # Quoted heredoc, and indented to sit inside this block scalar. The
+          # first version inlined the same script as `python3 -c "..."` with
+          # its lines starting at column 0, which dedents out of the block and
+          # made the entire workflow file unparseable — GitHub listed the
+          # workflow by path instead of name, created a zero-job run on every
+          # push, and never once ran the schedule. Keep the Python indented
+          # with the shell around it; YAML strips the common indent before the
+          # shell ever sees it.
+          # The response arrives by environment, not by pipe: `python3 -`
+          # reads the program itself from stdin, so a heredoc and a pipe fight
+          # over the same stream and the pipe loses — json.load(sys.stdin) then
+          # sees an already-consumed heredoc and dies on an empty document.
+          RESPONSE="$response" python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+
+          data = json.loads(os.environ["RESPONSE"])
+          results = data.get("results", [])
+          failed = [r for r in results if r.get("status") == "failed"]
+
+          print("### Monitoring run\n")
+          print(f"Checked {data.get('checked', 0)} site(s), {len(failed)} failed.\n")
+          for r in results:
+              line = r.get("changeSummary") or r.get("error") or "no changes"
+              print(f"- `{r['url']}` — {r['status']}: {line}")
+          PY
