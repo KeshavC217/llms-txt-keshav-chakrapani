@@ -148,6 +148,57 @@ can reach — `http://169.254.169.254/` (cloud instance metadata) included. A pu
 
 Set `ALLOW_PRIVATE_CRAWL_TARGETS=1` to bypass it when testing against a local server.
 
+## The AI sieve
+
+`POST /api/enhance` is the model-assisted path: everything `/api/generate` does, then two model
+passes over the result. It is a separate endpoint because it differs in all three ways that matter -
+it needs an account, it spends money, and it takes seconds rather than milliseconds.
+
+**Stage one, the guide.** One call carrying the whole skeleton, returning a site summary and a
+better name for each section. This is the global judgment, made once however many links there are.
+
+**Stage two, annotation.** Links are chunked ten at a time *within a section*, four calls in flight,
+each chunk carrying its section name and the stage-one summary. A chunk of links that share a
+subject gets sharper notes than one mixing the API reference with the careers page.
+
+**The sieve is the third stage, and the reason for the name.** The model proposes; deterministic
+code disposes. Every proposal is checked against something already known to be true:
+
+| proposal | accepted only if |
+|---|---|
+| note | it keys a URL we actually extracted, is at most 12 words, and does not restate its title |
+| summary | one sentence, under 200 characters, no URL, not merely the site name again |
+| section name | short, not a locale, not a duplicate of another section |
+| the whole file | it still parses as a conforming llms.txt |
+
+A hallucinated URL cannot enter the file, because notes attach by looking the URL up among the links
+already extracted - an invented one has nowhere to land. Every slot the model fills is optional in
+the spec, so rejecting is always safe: a dropped note leaves a link without one, which is a poorer
+file and still a valid one.
+
+The endpoint reports what survived (`notesAccepted`, `notesRejected`, `sectionsRenamed`,
+`chunksFailed`), so a model that is quietly doing nothing is visible rather than inferred.
+
+### Choosing the models
+
+`npm run bench` measures the candidates on these two jobs. Not part of `npm test`: it needs a key
+and a network, and its numbers move with whatever the providers are doing.
+
+| model | chunk (median of 3) | guide | $/M in -> out |
+|---|---|---|---|
+| `gemini-3.5-flash-lite` | **1.28s** (1.3/1.3/1.2) | **0.67s** | 0.30 -> 2.50 |
+| `gemma-4-31b-it` | 2.37s (2.2/2.4/3.3) | 1.78s | 0.09 -> 0.34 |
+| `gpt-oss-120b` | 3.20s (**49.6**/3.2/0.9) | 2.01s | 0.037 -> 0.17 |
+| `deepseek-v4-flash` | 7.32s | 9.73s | 0.089 -> 0.177 |
+
+All four return valid JSON, and all four reached the same judgment on the guide task - so the choice
+is latency and cost, not capability. Gemini guides because its variance is near zero; Gemma works
+the chunks because its output is a third the price and that is what multiplies. `gpt-oss-120b`
+spends reasoning tokens on trivial work and produced a 49.6-second outlier annotating eight links;
+`reasoning: {enabled: false}` is rejected outright and low effort does not fix the tail.
+
+Measured end to end: 8-14 seconds a site, every note accepted, roughly a quarter of a cent.
+
 ## Accounts
 
 The generator is open to everyone. An account is only required for the LLM features, which cost
