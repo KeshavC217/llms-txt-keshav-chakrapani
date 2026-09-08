@@ -1,5 +1,6 @@
 import type { Extraction, LinkEntry } from "../naiveExtractor.ts";
 import { type Transport, parseJson } from "./openrouter.ts";
+import { type FailureKind, ModelError, isFatal } from "./errors.ts";
 import { workerModel } from "./models.ts";
 
 /**
@@ -56,14 +57,21 @@ export async function runAnnotation(
   extraction: Extraction,
   transport: Transport,
   signal: AbortSignal,
-): Promise<{ notes: Record<string, unknown>; failed: number }> {
+): Promise<{ notes: Record<string, unknown>; failed: number; failures: Partial<Record<FailureKind, number>>; fatal?: ModelError }> {
   const chunks = chunkLinks(extraction);
   const notes: Record<string, unknown> = {};
+  const failures: Partial<Record<FailureKind, number>> = {};
   let failed = 0;
   let next = 0;
+  let fatal: ModelError | undefined;
 
   async function worker() {
     while (next < chunks.length) {
+      // An empty account or a rejected key fails every remaining chunk the same
+      // way. Stopping is both faster and more honest than proving it a dozen
+      // more times.
+      if (fatal) return;
+
       const chunk = chunks[next++];
       try {
         const reply = await transport(
@@ -78,15 +86,19 @@ export async function runAnnotation(
         const parsed = parseJson<{ notes?: Record<string, unknown> }>(reply);
         if (!parsed?.notes) {
           failed += 1;
+          failures.unparseable = (failures.unparseable ?? 0) + 1;
           continue;
         }
         Object.assign(notes, parsed.notes);
-      } catch {
+      } catch (error) {
         failed += 1;
+        const kind = error instanceof ModelError ? error.kind : "unknown";
+        failures[kind] = (failures[kind] ?? 0) + 1;
+        if (error instanceof ModelError && isFatal(kind)) fatal = error;
       }
     }
   }
 
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, worker));
-  return { notes, failed };
+  return { notes, failed, failures, fatal };
 }
