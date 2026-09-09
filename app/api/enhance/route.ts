@@ -64,7 +64,24 @@ export async function POST(request: Request) {
   }
 
   const extraction = extract(page.body, page.url);
-  const { llmsTxt, enhanced, report } = await enhance(extraction, page.url);
+  const { llmsTxt, enhanced, report, fatal } = await enhance(extraction, page.url);
+
+  // An empty account or a rejected key is a broken deployment, not a thin
+  // result. Returning 200 with a quietly worse file would hide the one failure
+  // an operator has to act on.
+  if (fatal) {
+    return NextResponse.json(
+      {
+        error:
+          fatal.kind === "credits"
+            ? "The AI features are temporarily unavailable: the OpenRouter account is out of credits."
+            : "The AI features are misconfigured: OpenRouter rejected the API key.",
+        report,
+      },
+      { status: 503 },
+    );
+  }
+
   const issues = validateLlmsTxt(llmsTxt);
 
   return NextResponse.json({

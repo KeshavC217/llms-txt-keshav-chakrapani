@@ -4,6 +4,7 @@ import { type Transport, openRouter } from "./openrouter.ts";
 import { type SieveReport, applyProposals, emptyReport } from "./sieve.ts";
 import { runAnnotation } from "./annotate.ts";
 import { runGuide } from "./guide.ts";
+import { type FailureKind, ModelError, isFatal } from "./errors.ts";
 import { guideModel, workerModel } from "./models.ts";
 
 /**
@@ -16,12 +17,31 @@ import { guideModel, workerModel } from "./models.ts";
  * returned. The AI is an improvement or it is nothing.
  */
 
-const BUDGET_MS = 20_000;
+/**
+ * Kept well inside maxDuration = 60. Was 20s, which a retry could push a chunk
+ * past: a live run lost a chunk of docs.exa.ai to the deadline rather than to
+ * any failure, and its links silently kept no note. Waiting is cheaper than
+ * losing them, and the abort still stops a slow model from holding the request
+ * open past the function's own limit.
+ */
+const BUDGET_MS = 35_000;
 
 export interface EnhanceResult {
   llmsTxt: string;
   enhanced: boolean;
-  report: SieveReport & { guideModel: string; workerModel: string; reason?: string };
+  report: SieveReport & {
+    guideModel: string;
+    workerModel: string;
+    reason?: string;
+    /** Failures by kind, so a rate limit does not read as a slow model. */
+    failures?: Partial<Record<FailureKind, number>>;
+  };
+  /**
+   * Set when the account itself is the problem - out of credits, or a key that
+   * is not accepted. The route turns this into a status code, because no amount
+   * of retrying or waiting will produce a better file.
+   */
+  fatal?: ModelError;
 }
 
 export async function enhance(
@@ -44,9 +64,27 @@ export async function enhance(
 
   try {
     // The guide runs first because its summary is context for every chunk.
-    const proposals = await runGuide(extraction, guideTransport, controller.signal).catch(() => ({}));
-    const { notes, failed } = await runAnnotation(extraction, workerTransport, controller.signal);
+    // The guide runs first because its summary is context for every chunk. If
+    // it fails on the account rather than the request, the chunks would each
+    // fail the same way, so there is no point starting them.
+    let guideFatal: ModelError | undefined;
+    const proposals = await runGuide(extraction, guideTransport, controller.signal).catch((error) => {
+      if (error instanceof ModelError && isFatal(error.kind)) guideFatal = error;
+      return {};
+    });
+
+    if (guideFatal) {
+      return {
+        llmsTxt: deterministic,
+        enhanced: false,
+        report: { ...report, ...models, reason: guideFatal.kind },
+        fatal: guideFatal,
+      };
+    }
+
+    const { notes, failed, failures, fatal } = await runAnnotation(extraction, workerTransport, controller.signal);
     report.chunksFailed = failed;
+    report.failures = failures;
 
     const improved = applyProposals(extraction, { ...proposals, notes }, report);
     const llmsTxt = render(improved, url);
@@ -61,7 +99,8 @@ export async function enhance(
     return {
       llmsTxt: changed ? llmsTxt : deterministic,
       enhanced: changed,
-      report: { ...report, ...models, reason: changed ? undefined : "nothing-accepted" },
+      report: { ...report, ...models, reason: changed ? undefined : fatal?.kind ?? "nothing-accepted" },
+      fatal,
     };
   } catch (err) {
     return {

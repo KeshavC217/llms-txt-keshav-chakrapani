@@ -179,6 +179,28 @@ file and still a valid one.
 The endpoint reports what survived (`notesAccepted`, `notesRejected`, `sectionsRenamed`,
 `chunksFailed`), so a model that is quietly doing nothing is visible rather than inferred.
 
+### When a call fails
+
+Failures are told apart rather than counted together, because they call for different things:
+
+| kind | what it is | what happens |
+|---|---|---|
+| `rate-limited` | 429, from the platform or every provider at capacity | up to 3 attempts, honouring `Retry-After` |
+| `upstream` | 5xx | up to 3 attempts |
+| `credits` | 402, the account cannot pay | stops immediately, endpoint answers 503 |
+| `auth` | 401/403, key missing or rejected | stops immediately, endpoint answers 503 |
+| `timeout` | our own deadline | not retried; those links keep no note |
+| `unparseable` | a reply that is not usable JSON | not retried - temperature is 0, so it would repeat |
+
+Backoff is exponential with full jitter. The jitter is the point rather than a refinement: chunks
+are dispatched together, so they meet a rate limit together, and a fixed delay would send the whole
+batch back in step and reproduce the burst that caused it.
+
+An empty account is the case worth separating. It fails every chunk identically, so the run stops at
+the first 402 rather than proving it a dozen more times, and the endpoint returns **503 with a
+reason** instead of 200 and a quietly thinner file - that is the one failure an operator has to act
+on, and it should not look like a slow model.
+
 ### Choosing the models
 
 `npm run bench` measures the candidates on these two jobs. Not part of `npm test`: it needs a key

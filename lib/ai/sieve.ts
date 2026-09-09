@@ -28,6 +28,12 @@ export interface SieveReport {
   summaryReplaced: boolean;
   sectionsRenamed: number;
   chunksFailed: number;
+  /**
+   * Failures broken down by kind. A chunk lost to a rate limit and one lost to
+   * a model that replied with prose are the same size in the file and call for
+   * entirely different responses.
+   */
+  failures?: Record<string, number>;
 }
 
 /**
