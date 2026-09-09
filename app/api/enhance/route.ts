@@ -10,6 +10,7 @@ import { aiConfigured } from "@/lib/ai/models";
 import { authConfigured } from "@/lib/supabase/config";
 import { getUser } from "@/lib/supabase/server";
 import { validateLlmsTxt } from "@/lib/spec";
+import { isFresh, readGeneration, storeConfigured, writeGeneration } from "@/lib/store";
 
 /**
  * The model-assisted path: everything /api/generate does, then a guide pass and
@@ -46,6 +47,22 @@ export async function POST(request: Request) {
   });
   if (!access.allowed) {
     return NextResponse.json({ error: access.error }, { status: access.status });
+  }
+
+  // Checked before fetching: a stored answer means neither this site nor the
+  // models need to be touched at all.
+  if (storeConfigured()) {
+    const stored = await readGeneration(url);
+    if (stored && isFresh(stored.generatedAt)) {
+      return NextResponse.json({
+        url: stored.url,
+        llmsTxt: stored.llmsTxt,
+        enhanced: true,
+        cached: true,
+        generatedAt: stored.generatedAt,
+        spec: { valid: validateLlmsTxt(stored.llmsTxt).length === 0, issues: [] },
+      });
+    }
   }
 
   if (!aiConfigured()) {
@@ -125,8 +142,16 @@ export async function POST(request: Request) {
 
   const issues = validateLlmsTxt(llmsTxt);
 
+  // Only stored when the models actually improved it and the result conforms.
+  // A file the AI could not help with is the deterministic one, which anyone
+  // can have for free from the other endpoint; keeping it would fill the table
+  // with rows that save nothing.
+  const stored = enhanced && issues.length === 0 && storeConfigured() ? await writeGeneration(url, llmsTxt) : false;
+
   return NextResponse.json({
     url: page.url,
+    cached: false,
+    stored,
     status: page.status,
     contentType: page.contentType,
     truncated: page.truncated,
