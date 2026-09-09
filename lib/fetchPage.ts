@@ -8,6 +8,8 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
+import { type Block, detectBlock } from "./blocks.ts";
+
 export interface FetchedPage {
   url: string;
   status: number;
@@ -15,11 +17,22 @@ export interface FetchedPage {
   body: string;
   truncated: boolean;
   isHtml: boolean;
+  /** Set when the response is the site refusing us rather than the page. */
+  block?: Block;
 }
 
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_BYTES = 2_000_000;
 const USER_AGENT = "llms-txt-generator/0.1 (+https://llmstxt.org)";
+
+/**
+ * These describe what we can accept rather than claiming to be anything, and
+ * some CDNs reject a request that omits them outright.
+ */
+const COMMON_HEADERS = {
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+};
 
 /** Adds https:// when the user omits it, and rejects anything that isn't http(s). */
 export function normalizeUrl(input: string): string | null {
@@ -91,12 +104,19 @@ async function assertPublicUrl(url: string): Promise<void> {
 /**
  * Fetches the page, or throws with a message meant for the person who typed
  * the URL. Callers map that to a status code.
+ *
+ * A refusal is not an exception: a challenge page is a perfectly good HTTP
+ * response, and the caller needs to know which of the two it received.
  */
 export async function fetchPage(url: string): Promise<FetchedPage> {
   await assertPublicUrl(url);
 
+  return request(url, USER_AGENT);
+}
+
+async function request(url: string, userAgent: string): Promise<FetchedPage> {
   const response = await fetch(url, {
-    headers: { "User-Agent": USER_AGENT, Accept: "*/*" },
+    headers: { "User-Agent": userAgent, ...COMMON_HEADERS },
     redirect: "follow",
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
@@ -118,5 +138,6 @@ export async function fetchPage(url: string): Promise<FetchedPage> {
     // Only HTML has a title, links and prose to pull apart. Anything else
     // (a text file, JSON) has nothing to parse.
     isHtml: /html/i.test(contentType ?? "") || /^\s*<(!doctype|html)/i.test(body),
+    block: detectBlock(response.status, response.headers, body) ?? undefined,
   };
 }

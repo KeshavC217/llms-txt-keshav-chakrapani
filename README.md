@@ -118,6 +118,62 @@ those URLs would mean emitting links we have never seen. And where a page advert
 on - a markdown twin for the fetched page says nothing verifiable about the pages it links to. If a
 site already publishes its own llms.txt, the UI says so: theirs is authoritative.
 
+### When a site will not let us read it
+
+Measured across a sample of well-known sites, refusals fall into three kinds that need three
+different things:
+
+| what happens | example | what it needs |
+|---|---|---|
+| 403, no challenge | `zillow.com` (by address reputation) | nothing that a header can fix |
+| 403 with an anti-bot challenge | `openai.com`, `g2.com`, `medium.com`, `indeed.com` | a real browser, and often more |
+| 200 with an empty shell | `docs.convex.dev` | a real browser |
+
+**Headers.** We send `Accept` and `Accept-Language`, which some CDNs require, and identify ourselves
+honestly in the User-Agent. We do not retry as a browser.
+
+That was tried and removed. `zillow.com` looked like the case for it - 403 to curl, a full page to
+us - until the difference turned out to be the HTTP client rather than the header: zillow refuses
+curl whatever User-Agent it sends, and served Node's fetch whatever User-Agent *it* sent, until
+repeated testing from one address turned that into a 403 as well. What varies is TLS fingerprint and
+address reputation, neither of which a header changes. Nothing in a thirty-site scan was helped by
+the swap, so the code went rather than shipping an impersonation that could not be shown to work.
+
+**Challenges are detected rather than fought.** `cf-mitigated: challenge`, `challenge-platform`,
+`_cf_chl` and their siblings are recognised from live responses, and the endpoint says which site
+refused us and why. This matters more than it sounds: a challenge page parses perfectly well, and
+before this the generator turned Medium into an llms.txt summarised as *"This website is using a
+security service to protect itself from online attacks."* A confident file about Cloudflare.
+
+**A browser, when there is one.** Set `RENDER_ENDPOINT` to a Browserless-compatible service and a
+shell or a challenge is retried through it. Chromium is not bundled - it does not fit comfortably in
+a Vercel function, and it is needed on a small fraction of requests - so the browser lives behind an
+HTTP call and swapping provider is an env var. Rendered HTML is adopted only if it extracts *more*
+links than the plain response did; a bigger page with nothing on it is not an improvement.
+
+**Does a real browser solve it?** Measured with Playwright, and the answer depends entirely on
+whether the browser has a screen:
+
+| site | headless | headed |
+|---|---|---|
+| `docs.convex.dev` | 200, 101 links | 200, 101 links |
+| `openai.com` | 403, "Just a moment..." | 200, 458KB, 90 links |
+| `medium.com` | 403, "Attention Required" | 200, 52KB, 22 links |
+| `g2.com` | 403 | 403 |
+
+Headless fixes the JavaScript-rendered pages completely and does nothing at all for the challenges -
+which matters, because a server has no screen. Headed Chrome gets through two of the three, and
+`g2.com` refuses both. So a browser is the answer for row three and not for row two, and the
+remaining options there are a paid unblocking service that maintains browser-identical TLS
+fingerprints, or accepting that a site which went to this trouble does not want to be read by a
+program. Note `openai.com` allows everything in its robots.txt while its edge refuses us: the crawl
+policy and the bot filter are set by different people.
+
+A caution learned the hard way: Cloudflare leaves its scripts in the pages it protects, so
+`crunchbase.com` answers 200 with 128KB of real content and a `challenge-platform` script in it. An
+earlier version of the detector read the body alone and refused two working sites. Body markers now
+only count when the status says we were refused.
+
 ### Known limits
 
 Most links carry no note. A single page rarely says anything about the pages it links to, and the
