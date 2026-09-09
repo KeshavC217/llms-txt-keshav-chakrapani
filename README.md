@@ -315,6 +315,49 @@ file for the same reference, keeping whichever separated them furthest:
 sections 9 out of 15. `qwen3.7-flash` and `ling-3.0-flash` returned nothing at all - both are
 reasoning models that spend the entire token budget thinking and answer with empty content.
 
+## What gets stored
+
+AI-assisted results are kept; nothing else is. `/api/enhance` looks in the store before fetching, so
+a hit costs neither a request to the site nor a model call: react.dev takes 28.8s to generate and
+0.6s to serve again, byte for byte identical.
+
+**Globally, not per user.** The file is derived entirely from public pages, so two people asking
+about the same site should get the same answer, and crawling it twice to produce identical output is
+how a tool earns a site's 429s.
+
+**Only the AI-assisted path writes.** It is the expensive one and the one behind an account. The
+deterministic file is free and fast from `/api/generate`, so storing it would fill the table with
+rows that save nothing - and a public endpoint that writes to durable storage is an invitation to
+fill it with junk.
+
+Only a result the models actually improved, and which still conforms to the spec, is written.
+
+```sql
+create table public.generations (
+  url          text primary key,
+  llms_txt     text        not null,
+  content_hash text        not null,
+  generated_at timestamptz not null default now()
+);
+
+alter table public.generations enable row level security;
+create index generations_generated_at_idx on public.generations (generated_at);
+```
+
+RLS is enabled with **no policies at all**, so the publishable key can neither read nor write:
+verified against the live project, a browser-key read returns zero rows and a browser-key insert is
+refused with *"new row violates row-level security policy"*. The store uses `SUPABASE_SECRET_KEY`,
+which bypasses RLS and never leaves the server - the first thing in this project to need it.
+
+`content_hash` is written now although nothing reads it yet: it is what change detection will
+compare, and adding the column later would mean a migration.
+
+Freshness defaults to 24 hours, overridable with `GENERATION_MAX_AGE_MS`.
+
+Storage is an optimisation, not a dependency. A missing table, a revoked key or an unreachable
+database all mean "no cached answer", which is a state the endpoint already handles - verified by
+running against the live project before the table existed.
+
 ## Accounts
 
 The generator is open to everyone. An account is only required for the LLM features, which cost
