@@ -204,6 +204,92 @@ can reach — `http://169.254.169.254/` (cloud instance metadata) included. A pu
 
 Set `ALLOW_PRIVATE_CRAWL_TARGETS=1` to bypass it when testing against a local server.
 
+## Crawling
+
+The generator reads the site, not just the page it was given.
+
+**If the site publishes its own `llms.txt`, that is the answer.** Someone there chose what belonged
+in it, which is more than a crawl can work out. It is checked before anything else, so it costs one
+request rather than fifty: `getlago.com` returns in 0.2s instead of 8.4s. `regenerate: true` asks for
+ours instead.
+
+Recognised by shape - served as text, opening with an H1 - rather than by conformance. Strict
+validation was tried first and rejected almost everything, including getlago's considered file, whose
+prose under a section heading the grammar forbids. Whether it conforms is reported, not used to hide
+it.
+
+**Otherwise it crawls.** Discovery is the sitemap plus the links on the pages themselves, and both
+are needed: `react.dev` answers 404 for `/sitemap.xml`, while `getlago.com` has a 282-URL sitemap
+containing not one `/docs` page.
+
+### The same site gives the same file
+
+The crawl plans before it fetches, and that is what makes the output reproducible.
+
+It used to let the race decide: four workers pulled from a queue until fifty pages came back, so the
+fifty were whichever answered fastest. Two runs against an unchanged site produced different files -
+`vercel.com` and `docs.stripe.com` each drifted by a link, and the page count wobbled between 50 and
+52 because requests already in flight landed after the stop. That makes a content hash worthless for
+noticing real change, and quietly biases the file towards whatever a site serves quickest.
+
+Now selection is a pure function of what the site publishes - its sitemap in file order, and page
+links in document order - ranked by a total order with no ties, one section at a time. Fetching
+happens afterwards and cannot alter the list; results are sorted back into plan order, so a slow
+response changes when a page arrives and never whether it is included.
+
+Discovery still goes deeper than the first page, in waves: each wave is planned from the complete
+result of the one before, so following links stays deterministic. Without that, `react.dev` - which
+publishes no sitemap - would see only the 21 links on its home page instead of 50 pages.
+
+Measured, three runs each: `vercel.com`, `docs.stripe.com`, `getlago.com` and `react.dev` now
+produce byte-identical files. A test does the same against a fixture server that answers with random
+latency, so arrival order differs on every run and the output must not.
+
+What is still not deterministic is honest about itself. A crawl that hits the 25-second safety valve
+is marked `partial` and is not stored, because its contents depend on how fast the network was.
+Failures deliberately do not count as partial: a page failing twice is nearly always a stale sitemap
+entry that fails identically every run - `docs.stripe.com` loses one page and `getlago.com` two, and
+every run still hashes the same.
+
+The pacer belongs to the site rather than to us: it widens its interval on every 429, 503 or doubling
+of latency and never narrows within a crawl. It changes how fast the planned pages are fetched, not
+which they are.
+
+Politeness is not only manners. Measured on `getlago.com`, four workers with a 150ms gap fetched 30
+pages in **2.7s** with a p90 of 306ms; eight workers with no gap took **4.3s** with a p90 of
+**2032ms**. Asking harder made the site slower to answer.
+
+`robots.txt` is fetched and obeyed - 104 URLs skipped on `modal.com` in one crawl.
+
+### What crawling changed
+
+| site | links | links with a real description |
+|---|---|---|
+| getlago.com | 68 -> 82 | 32 -> 70 |
+| docs.stripe.com | 45 -> 52 | 1 -> 30 |
+| modal.com | - -> 67 | - -> 28 |
+
+Measured against files real sites publish (`npm run integration`, 11 sites), the deterministic output
+went from **7.00/15 to 8.00**, its descriptions from 1.91 to 2.64. The AI-assisted output moved much
+less, from 8.55 to 8.73 - the sieve had been compensating for the missing descriptions, and now has
+better raw material rather than more work to do. Coverage barely moved and remains the weak axis:
+fifty pages is not a whole site.
+
+### Three things testing changed
+
+**Ordering by depth starved the pages worth having.** `getlago.com` keeps its documentation out of
+the sitemap, so shallowest-first spent the budget on `/about-us` and `/blog`. The frontier now gives
+each section a turn.
+
+**The first fallback discarded whole crawls.** It kept whichever of crawl and single page had more
+links, so a home page linking 68 pages beat a crawl of 27 and the crawl was thrown away. Crawling is
+now strictly additive: the home page knows what a site points at, the crawl knows what those pages
+are.
+
+**Template descriptions are worse than none.** Sites set one description for every page - every
+getlago doc claims to be "Developer documentation for Lago's API-first billing platform". A
+description repeated across a fifth of the crawl is dropped, and the home page's specific note kept.
+
 ## The AI sieve
 
 `POST /api/enhance` is the model-assisted path: everything `/api/generate` does, then two model

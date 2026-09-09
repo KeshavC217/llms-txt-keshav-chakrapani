@@ -102,7 +102,9 @@ async function ours(path, url, cookie) {
   const response = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
-    body: JSON.stringify({ url }),
+    // regenerate: the endpoint now hands back a site's own llms.txt when it
+    // publishes one, and grading that against itself would measure nothing.
+    body: JSON.stringify({ url, regenerate: true }),
   });
 
   const payload = await response.json().catch(() => ({}));

@@ -23,7 +23,7 @@ export interface FetchedPage {
 
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_BYTES = 2_000_000;
-const USER_AGENT = "llms-txt-generator/0.1 (+https://llmstxt.org)";
+export const USER_AGENT = "llms-txt-generator/0.1 (+https://llmstxt.org)";
 
 /**
  * These describe what we can accept rather than claiming to be anything, and
