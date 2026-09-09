@@ -44,10 +44,24 @@ const CHALLENGE_MARKERS = [
   "captcha-delivery",
 ];
 
+/** Statuses that mean the site declined to serve the page. */
+const REFUSED = new Set([401, 403, 429, 503]);
+
 export function detectBlock(status: number, headers: Headers, body: string): Block | null {
   const sample = body.slice(0, 4000).toLowerCase();
+
+  /*
+   * Body markers only count when the status says we were refused.
+   *
+   * Cloudflare leaves its scripts in the pages it protects, so a perfectly good
+   * response carries them too: crunchbase.com answers 200 with 128KB of real
+   * content and the challenge-platform script in it, and ticketmaster.com
+   * answers 200 with the words "Just a Moment" somewhere in half a megabyte of
+   * page. Trusting the body alone fails both of those sites, which work.
+   */
   const challenged =
-    headers.get("cf-mitigated") === "challenge" || CHALLENGE_MARKERS.some((marker) => sample.includes(marker));
+    headers.get("cf-mitigated") === "challenge" ||
+    (REFUSED.has(status) && CHALLENGE_MARKERS.some((marker) => sample.includes(marker)));
 
   if (challenged) {
     return {

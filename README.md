@@ -146,11 +146,28 @@ a Vercel function, and it is needed on a small fraction of requests - so the bro
 HTTP call and swapping provider is an env var. Rendered HTML is adopted only if it extracts *more*
 links than the plain response did; a bigger page with nothing on it is not an improvement.
 
-Worth being honest about the third row: a headless browser fixes JavaScript-rendered pages
-completely, and anti-bot challenges only sometimes. Cloudflare and its peers fingerprint the TLS
-handshake and look for the marks of automation, so plain headless Chrome is often recognised too.
-Past that point the options are a paid unblocking service or accepting that a site which has gone to
-this much trouble does not want to be read by a program.
+**Does a real browser solve it?** Measured with Playwright, and the answer depends entirely on
+whether the browser has a screen:
+
+| site | headless | headed |
+|---|---|---|
+| `docs.convex.dev` | 200, 101 links | 200, 101 links |
+| `openai.com` | 403, "Just a moment..." | 200, 458KB, 90 links |
+| `medium.com` | 403, "Attention Required" | 200, 52KB, 22 links |
+| `g2.com` | 403 | 403 |
+
+Headless fixes the JavaScript-rendered pages completely and does nothing at all for the challenges -
+which matters, because a server has no screen. Headed Chrome gets through two of the three, and
+`g2.com` refuses both. So a browser is the answer for row three and not for row two, and the
+remaining options there are a paid unblocking service that maintains browser-identical TLS
+fingerprints, or accepting that a site which went to this trouble does not want to be read by a
+program. Note `openai.com` allows everything in its robots.txt while its edge refuses us: the crawl
+policy and the bot filter are set by different people.
+
+A caution learned the hard way: Cloudflare leaves its scripts in the pages it protects, so
+`crunchbase.com` answers 200 with 128KB of real content and a `challenge-platform` script in it. An
+earlier version of the detector read the body alone and refused two working sites. Body markers now
+only count when the status says we were refused.
 
 ### Known limits
 

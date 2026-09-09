@@ -50,6 +50,19 @@ test("an ordinary page is not a block", () => {
   assert.equal(detectBlock(500, headers(), "<html>Server error</html>"), null);
 });
 
+test("a working site that merely carries Cloudflare's scripts is not blocked", () => {
+  // Measured, not imagined: crunchbase.com answers 200 with 128KB of real page
+  // and the challenge-platform script still in it; ticketmaster.com answers 200
+  // with "Just a Moment" somewhere inside half a megabyte. An earlier version
+  // of this detector took both for challenges and refused two working sites.
+  const crunchbase = '<html><body><h1>Companies</h1><script src="/cdn-cgi/challenge-platform/h/b/orchestrate"></script></body></html>';
+  assert.equal(detectBlock(200, headers({ server: "cloudflare" }), crunchbase), null);
+  assert.equal(detectBlock(200, headers(), "<html><body>Just a Moment, please hold</body></html>"), null);
+
+  // The same markers on a refusal are exactly what they look like.
+  assert.equal(detectBlock(403, headers(), crunchbase)?.kind, "bot-challenge");
+});
+
 test("the word 'challenge' in ordinary prose does not trip detection", () => {
   // The markers are script paths and verification copy, not the English word.
   assert.equal(detectBlock(200, headers(), "<p>The challenge of scaling teams</p>"), null);
