@@ -28,6 +28,11 @@ import { SUPABASE_URL } from "./supabase/config.ts";
  * worse, a public endpoint that writes to durable storage is an invitation to
  * fill it with junk, and requiring an account closes that.
  *
+ * The key is the URL alone, and stays that way only because every crawl uses
+ * the same page ceiling. Anything that makes the output depend on a request
+ * option - a prefix filter, a depth - has to enter the key with it, or the
+ * first caller's options would be served to everyone who follows.
+ *
  * Where this stops being right: the moment output stops being a pure function
  * of public data. If people can edit their file, supply their own prompt, or
  * point at a site only they can reach, that artifact is theirs and cannot be
@@ -114,7 +119,12 @@ export async function writeGeneration(url: string, llmsTxt: string): Promise<boo
 
   const { error } = await supabase
     .from(TABLE)
-    .upsert({ url, llms_txt: llmsTxt, content_hash: hashContent(llmsTxt), generated_at: new Date().toISOString() });
+    .upsert({
+      url,
+      llms_txt: llmsTxt,
+      content_hash: hashContent(llmsTxt),
+      generated_at: new Date().toISOString(),
+    });
 
   return !error;
 }

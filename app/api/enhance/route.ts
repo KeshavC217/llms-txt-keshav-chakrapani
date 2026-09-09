@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { checkLlmAccess } from "@/lib/authGate";
 import { enhance } from "@/lib/ai/enhance";
 import { extract, linkCount } from "@/lib/naiveExtractor";
+import { generate } from "@/lib/generate";
+import { findPublished } from "@/lib/published";
+import { USER_AGENT } from "@/lib/fetchPage";
 import { fetchPage, normalizeUrl } from "@/lib/fetchPage";
 import { classifyEmpty, explain } from "@/lib/blocks";
 import { renderConfigured, renderPage } from "@/lib/render";
@@ -26,7 +29,7 @@ import { isFresh, readGeneration, storeConfigured, writeGeneration } from "@/lib
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
-  let body: { url?: string };
+  let body: { url?: string; regenerate?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -48,6 +51,7 @@ export async function POST(request: Request) {
   if (!access.allowed) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
+
 
   // Checked before fetching: a stored answer means neither this site nor the
   // models need to be touched at all.
@@ -94,7 +98,28 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "That URL is not an HTML page, so there is nothing to enhance." }, { status: 415 });
   }
 
-  let extraction = extract(page.body, page.url);
+  // If the site publishes its own, that is the answer: someone chose what
+  // belonged in it, and one request settles it instead of fifty.
+  const seed = extract(page.body, page.url);
+
+  if (body.regenerate !== true) {
+    const published = await findPublished(page.url, USER_AGENT, seed.existingLlmsTxt);
+    if (published) {
+      return NextResponse.json({
+        url: page.url,
+        status: page.status,
+        contentType: page.contentType,
+        truncated: false,
+        llmsTxt: published.llmsTxt,
+        source: "published",
+        publishedAt: published.url,
+        spec: { valid: published.conforms, issues: [] },
+      });
+    }
+  }
+
+  const { extraction: crawled, crawl } = await generate(page.body, page.url, { seed });
+  let extraction = crawled;
   // Nothing extracted is worth a second look: some sites serve a challenge with
   // a 200, which the status check above cannot see.
   if (linkCount(extraction) === 0) {
@@ -152,6 +177,7 @@ export async function POST(request: Request) {
     url: page.url,
     cached: false,
     stored,
+    crawl,
     status: page.status,
     contentType: page.contentType,
     truncated: page.truncated,

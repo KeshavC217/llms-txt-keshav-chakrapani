@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { extract, linkCount, render } from "@/lib/naiveExtractor";
+import { generate } from "@/lib/generate";
+import { findPublished } from "@/lib/published";
+import { USER_AGENT } from "@/lib/fetchPage";
 import { fetchPage, normalizeUrl } from "@/lib/fetchPage";
 import { classifyEmpty, explain } from "@/lib/blocks";
 import { renderConfigured, renderPage } from "@/lib/render";
@@ -12,8 +15,12 @@ import { validateLlmsTxt } from "@/lib/spec";
  * endpoint at /api/enhance, because it needs an account and a longer deadline.
  */
 
+// A crawl of up to 150 pages, paced, plus the render. Comfortably inside this,
+// but not inside the default.
+export const maxDuration = 60;
+
 export async function POST(request: Request) {
-  let body: { url?: string };
+  let body: { url?: string; regenerate?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -59,7 +66,28 @@ export async function POST(request: Request) {
     });
   }
 
-  let extraction = extract(page.body, page.url);
+  // If the site publishes its own, that is the answer: someone chose what
+  // belonged in it, and one request settles it instead of fifty.
+  const seed = extract(page.body, page.url);
+
+  if (body.regenerate !== true) {
+    const published = await findPublished(page.url, USER_AGENT, seed.existingLlmsTxt);
+    if (published) {
+      return NextResponse.json({
+        url: page.url,
+        status: page.status,
+        contentType: page.contentType,
+        truncated: false,
+        llmsTxt: published.llmsTxt,
+        source: "published",
+        publishedAt: published.url,
+        spec: { valid: published.conforms, issues: [] },
+      });
+    }
+  }
+
+  const { extraction: crawled, crawl } = await generate(page.body, page.url, { seed });
+  let extraction = crawled;
 
   // A shell with no links is the other case a browser fixes: nothing refused
   // us, the page simply had not built itself yet.
@@ -104,5 +132,6 @@ export async function POST(request: Request) {
     spec: { valid: issues.length === 0, issues },
     markdownAlternate: extraction.markdownAlternate,
     existingLlmsTxt: extraction.existingLlmsTxt,
+    crawl,
   });
 }

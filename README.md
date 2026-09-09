@@ -204,6 +204,64 @@ can reach — `http://169.254.169.254/` (cloud instance metadata) included. A pu
 
 Set `ALLOW_PRIVATE_CRAWL_TARGETS=1` to bypass it when testing against a local server.
 
+## Crawling
+
+The generator reads the site, not just the page it was given.
+
+**If the site publishes its own `llms.txt`, that is the answer.** Someone there chose what belonged
+in it, which is more than a crawl can work out. It is checked before anything else, so it costs one
+request rather than fifty: `getlago.com` returns in 0.2s instead of 8.4s. `regenerate: true` asks for
+ours instead.
+
+Recognised by shape - served as text, opening with an H1 - rather than by conformance. Strict
+validation was tried first and rejected almost everything, including getlago's considered file, whose
+prose under a section heading the grammar forbids. Whether it conforms is reported, not used to hide
+it.
+
+**Otherwise it crawls.** Discovery is the sitemap plus the links on the pages themselves, and both
+are needed: `react.dev` answers 404 for `/sitemap.xml`, while `getlago.com` has a 282-URL sitemap
+containing not one `/docs` page.
+
+Four things end a crawl. Three are ours - a ceiling of 50 pages, a 20 second budget, and diminishing
+returns when 20 consecutive pages add no section that is new. The fourth belongs to the site: the
+pacer widens its interval on every 429, 503 or doubling of latency, never narrows within a crawl, and
+ends the crawl when it reaches its ceiling.
+
+Politeness is not only manners. Measured on `getlago.com`, four workers with a 150ms gap fetched 30
+pages in **2.7s** with a p90 of 306ms; eight workers with no gap took **4.3s** with a p90 of
+**2032ms**. Asking harder made the site slower to answer.
+
+`robots.txt` is fetched and obeyed - 104 URLs skipped on `modal.com` in one crawl.
+
+### What crawling changed
+
+| site | links | links with a real description |
+|---|---|---|
+| getlago.com | 68 -> 82 | 32 -> 70 |
+| docs.stripe.com | 45 -> 52 | 1 -> 30 |
+| modal.com | - -> 67 | - -> 28 |
+
+Measured against files real sites publish (`npm run integration`, 11 sites), the deterministic output
+went from **7.00/15 to 8.00**, its descriptions from 1.91 to 2.64. The AI-assisted output moved much
+less, from 8.55 to 8.73 - the sieve had been compensating for the missing descriptions, and now has
+better raw material rather than more work to do. Coverage barely moved and remains the weak axis:
+fifty pages is not a whole site.
+
+### Three things testing changed
+
+**Ordering by depth starved the pages worth having.** `getlago.com` keeps its documentation out of
+the sitemap, so shallowest-first spent the budget on `/about-us` and `/blog`. The frontier now gives
+each section a turn.
+
+**The first fallback discarded whole crawls.** It kept whichever of crawl and single page had more
+links, so a home page linking 68 pages beat a crawl of 27 and the crawl was thrown away. Crawling is
+now strictly additive: the home page knows what a site points at, the crawl knows what those pages
+are.
+
+**Template descriptions are worse than none.** Sites set one description for every page - every
+getlago doc claims to be "Developer documentation for Lago's API-first billing platform". A
+description repeated across a fifth of the crawl is dropped, and the home page's specific note kept.
+
 ## The AI sieve
 
 `POST /api/enhance` is the model-assisted path: everything `/api/generate` does, then two model

@@ -8,6 +8,9 @@ interface Result {
   contentType: string | null;
   truncated: boolean;
   llmsTxt: string;
+  source?: "published";
+  publishedAt?: string;
+  crawl?: { pages: number; fetched: number; stoppedBy: string; fromSitemap: number; robotsDisallowed: number };
   enhanced?: boolean;
   report?: { notesAccepted: number; notesRejected: number; sectionsRenamed: number; chunksFailed: number; guideModel: string; workerModel: string; reason?: string };
   spec?: { valid: boolean; issues: { line: number; message: string }[] };
@@ -36,6 +39,7 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [enhance, setEnhance] = useState(false);
+  const [regenerate, setRegenerate] = useState(false);
 
   async function generate(event: React.FormEvent) {
     event.preventDefault();
@@ -48,7 +52,7 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
       const response = await fetch(enhance ? "/api/enhance" : "/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, regenerate }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Something went wrong.");
@@ -121,6 +125,26 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
         </p>
       )}
 
+      {result?.source === "published" && (
+        <div className="mt-6 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:bg-blue-950 dark:text-blue-300">
+          This is the site&apos;s own llms.txt, from{" "}
+          <a href={result.publishedAt} className="underline">
+            {result.publishedAt}
+          </a>
+          . Someone there chose what belonged in it.{" "}
+          <button
+            type="button"
+            className="underline"
+            onClick={() => {
+              setRegenerate(true);
+              setResult(null);
+            }}
+          >
+            Generate one anyway
+          </button>
+        </div>
+      )}
+
       {result && (
         <section className="mt-8">
           <div className="flex items-center justify-between gap-4">
@@ -134,6 +158,7 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
                   <span>{describeReport(result.report)}</span>
                 </>
               )}
+              {result.crawl && <>{" · "}<span>{result.crawl.pages} pages crawled</span></>}
               {result.spec && (
                 <>
                   {" · "}
