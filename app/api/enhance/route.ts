@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 
 import { checkLlmAccess } from "@/lib/authGate";
 import { enhance } from "@/lib/ai/enhance";
-import { extract } from "@/lib/naiveExtractor";
+import { extract, linkCount } from "@/lib/naiveExtractor";
 import { fetchPage, normalizeUrl } from "@/lib/fetchPage";
+import { explain } from "@/lib/blocks";
+import { renderConfigured, renderPage } from "@/lib/render";
 import { aiConfigured } from "@/lib/ai/models";
 import { authConfigured } from "@/lib/supabase/config";
 import { getUser } from "@/lib/supabase/server";
@@ -59,11 +61,34 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message }, { status });
   }
 
+  if (page.block) {
+    const rendered = page.block.kind === "bot-challenge" && renderConfigured() ? await renderPage(page.url) : null;
+
+    if (!rendered) {
+      return NextResponse.json(
+        { error: explain(page.block, page.url), blocked: page.block.kind, url: page.url },
+        { status: 502 },
+      );
+    }
+    page = { ...page, body: rendered.html, block: undefined, isHtml: true };
+  }
+
   if (!page.isHtml) {
     return NextResponse.json({ error: "That URL is not an HTML page, so there is nothing to enhance." }, { status: 415 });
   }
 
-  const extraction = extract(page.body, page.url);
+  let extraction = extract(page.body, page.url);
+  if (extraction.clientRendered && renderConfigured()) {
+    const rendered = await renderPage(page.url);
+    if (rendered) {
+      // Adopted only if it actually found more than the plain response did.
+      // "Longer HTML" is not the test - a renderer can return a bigger page
+      // that still has nothing on it.
+      const better = extract(rendered.html, page.url);
+      if (linkCount(better) > linkCount(extraction)) extraction = better;
+    }
+  }
+
   const { llmsTxt, enhanced, report, fatal } = await enhance(extraction, page.url);
 
   // An empty account or a rejected key is a broken deployment, not a thin

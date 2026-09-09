@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { extract, render } from "@/lib/naiveExtractor";
+import { extract, linkCount, render } from "@/lib/naiveExtractor";
 import { fetchPage, normalizeUrl } from "@/lib/fetchPage";
+import { explain } from "@/lib/blocks";
+import { renderConfigured, renderPage } from "@/lib/render";
 import { validateLlmsTxt } from "@/lib/spec";
 
 /**
@@ -33,6 +35,20 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message }, { status });
   }
 
+  // A challenge page parses perfectly well and describes nothing but the
+  // challenge, so it must not be turned into an llms.txt. Say what happened.
+  if (page.block) {
+    const rendered = page.block.kind === "bot-challenge" && renderConfigured() ? await renderPage(page.url) : null;
+
+    if (!rendered) {
+      return NextResponse.json(
+        { error: explain(page.block, page.url), blocked: page.block.kind, url: page.url },
+        { status: 502 },
+      );
+    }
+    page = { ...page, body: rendered.html, block: undefined, isHtml: true };
+  }
+
   if (!page.isHtml) {
     return NextResponse.json({
       url: page.url,
@@ -43,7 +59,21 @@ export async function POST(request: Request) {
     });
   }
 
-  const extraction = extract(page.body, page.url);
+  let extraction = extract(page.body, page.url);
+
+  // A shell with no links is the other case a browser fixes: nothing refused
+  // us, the page simply had not built itself yet.
+  if (extraction.clientRendered && renderConfigured()) {
+    const rendered = await renderPage(page.url);
+    if (rendered) {
+      // Adopted only if it actually found more than the plain response did.
+      // "Longer HTML" is not the test - a renderer can return a bigger page
+      // that still has nothing on it.
+      const better = extract(rendered.html, page.url);
+      if (linkCount(better) > linkCount(extraction)) extraction = better;
+    }
+  }
+
   const llmsTxt = render(extraction, page.url);
   const issues = validateLlmsTxt(llmsTxt);
 

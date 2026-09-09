@@ -118,6 +118,40 @@ those URLs would mean emitting links we have never seen. And where a page advert
 on - a markdown twin for the fetched page says nothing verifiable about the pages it links to. If a
 site already publishes its own llms.txt, the UI says so: theirs is authoritative.
 
+### When a site will not let us read it
+
+Measured across a sample of well-known sites, refusals fall into three kinds that need three
+different things:
+
+| what happens | example | what it needs |
+|---|---|---|
+| 403 to our agent, 200 to a browser's | `zillow.com` | different headers |
+| 403 with an anti-bot challenge | `openai.com`, `g2.com`, `medium.com`, `indeed.com` | a real browser, and often more |
+| 200 with an empty shell | `docs.convex.dev` | a real browser |
+
+**Headers.** We identify ourselves first, which is the courteous order and lets a site allow us
+deliberately. Only if that is refused with no challenge attached do we ask again as a browser would
+- `zillow.com` goes from 403 to 99 links on the second attempt. `FETCH_IDENTIFY_ONLY=1` turns the
+second attempt off.
+
+**Challenges are detected rather than fought.** `cf-mitigated: challenge`, `challenge-platform`,
+`_cf_chl` and their siblings are recognised from live responses, and the endpoint says which site
+refused us and why. This matters more than it sounds: a challenge page parses perfectly well, and
+before this the generator turned Medium into an llms.txt summarised as *"This website is using a
+security service to protect itself from online attacks."* A confident file about Cloudflare.
+
+**A browser, when there is one.** Set `RENDER_ENDPOINT` to a Browserless-compatible service and a
+shell or a challenge is retried through it. Chromium is not bundled - it does not fit comfortably in
+a Vercel function, and it is needed on a small fraction of requests - so the browser lives behind an
+HTTP call and swapping provider is an env var. Rendered HTML is adopted only if it extracts *more*
+links than the plain response did; a bigger page with nothing on it is not an improvement.
+
+Worth being honest about the third row: a headless browser fixes JavaScript-rendered pages
+completely, and anti-bot challenges only sometimes. Cloudflare and its peers fingerprint the TLS
+handshake and look for the marks of automation, so plain headless Chrome is often recognised too.
+Past that point the options are a paid unblocking service or accepting that a site which has gone to
+this much trouble does not want to be read by a program.
+
 ### Known limits
 
 Most links carry no note. A single page rarely says anything about the pages it links to, and the

@@ -630,6 +630,11 @@ export function render(extraction: Extraction, url: string): string {
   return out.join("\n");
 }
 
+/** How many links an extraction actually found, sections and Optional alike. */
+export function linkCount(extraction: Extraction): number {
+  return extraction.sections.reduce((total, section) => total + section.links.length, 0) + extraction.optional.length;
+}
+
 export function buildLlmsTxt(html: string, url: string): string {
   return render(extract(html, url), url);
 }
