@@ -7,6 +7,9 @@ import { Frontier, canonicalize } from "../lib/crawl/frontier.ts";
 import { Pacer } from "../lib/crawl/pacer.ts";
 import { readPage } from "../lib/pageMeta.ts";
 import { findPublished, publishedCandidates } from "../lib/published.ts";
+import { planCrawl } from "../lib/crawl/plan.ts";
+import { crawl } from "../lib/crawl/crawl.ts";
+import { createServer } from "node:http";
 
 const AGENT = "llms-txt-generator";
 
@@ -202,5 +205,110 @@ test("a published file is recognised by shape, not by conformance", async () => 
     assert.equal(await findPublished("https://x.com/", "test"), null);
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+const candidate = (url: string, sitemapPosition = Number.MAX_SAFE_INTEGER) => ({
+  url,
+  sitemapPosition,
+  segments: new URL(url).pathname.split("/").filter(Boolean),
+});
+
+test("the plan gives each section a turn", () => {
+  // A site's documentation should not be buried by its blog: getlago.com
+  // publishes 282 sitemap URLs and not one /docs page.
+  const plan = planCrawl(
+    [
+      candidate("https://x.com/blog/a", 1),
+      candidate("https://x.com/blog/b", 2),
+      candidate("https://x.com/blog/c", 3),
+      candidate("https://x.com/docs/a", 4),
+      candidate("https://x.com/docs/b", 5),
+    ],
+    4,
+  );
+
+  assert.equal(plan.urls.filter((url) => url.includes("/docs/")).length, 2);
+  assert.equal(plan.urls.filter((url) => url.includes("/blog/")).length, 2);
+});
+
+test("the plan is a total order, so the same input gives the same list", () => {
+  const input = [
+    candidate("https://x.com/b/2", 9),
+    candidate("https://x.com/a/1", 9),
+    candidate("https://x.com/a/2", 9),
+    candidate("https://x.com/b/1", 9),
+  ];
+
+  // Same positions and depths: only the tie-break separates them, which is
+  // exactly the case that used to be decided by whoever answered first.
+  const first = planCrawl(input, 4).urls;
+  const second = planCrawl([...input].reverse(), 4).urls;
+  assert.deepEqual(first, second);
+});
+
+test("a site smaller than the budget yields all of it, once", () => {
+  const plan = planCrawl([candidate("https://x.com/a"), candidate("https://x.com/b")], 50);
+  assert.deepEqual(plan.urls.sort(), ["https://x.com/a", "https://x.com/b"]);
+});
+
+/** A site that answers in a different order every time. */
+function jitteryServer(pages: Record<string, string>) {
+  const server = createServer((request, response) => {
+    const path = (request.url ?? "/").split("?")[0];
+    const body = pages[path];
+    // Random latency is the point: arrival order differs on every run, and the
+    // output must not.
+    setTimeout(() => {
+      if (body === undefined) {
+        response.writeHead(404).end("no");
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/html" }).end(body);
+    }, Math.random() * 120);
+  });
+
+  return new Promise<{ origin: string; close: () => void }>((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ origin: `http://127.0.0.1:${port}`, close: () => server.close() });
+    });
+  });
+}
+
+test("two crawls of an unchanged site produce the same pages, in the same order", async () => {
+  // The property monitoring depends on: if this is not true, a content hash
+  // reports a change every run and means nothing.
+  const page = (title: string, links: string[] = []) =>
+    `<html><head><title>${title}</title></head><body>${links
+      .map((href) => `<a href="${href}">${href}</a>`)
+      .join("")}</body></html>`;
+
+  const pages: Record<string, string> = {
+    "/": page("Home", ["/docs/a", "/docs/b", "/blog/a", "/blog/b", "/about"]),
+    "/docs/a": page("Docs A"),
+    "/docs/b": page("Docs B"),
+    "/blog/a": page("Blog A"),
+    "/blog/b": page("Blog B"),
+    "/about": page("About"),
+    "/robots.txt": "",
+  };
+
+  const server = await jitteryServer(pages);
+  try {
+    const runs = [];
+    for (let i = 0; i < 3; i += 1) {
+      const result = await crawl(server.origin, {
+        userAgent: "test",
+        seed: { url: `${server.origin}/`, html: pages["/"] },
+      });
+      runs.push(result.pages.map((p) => `${p.url} ${p.title}`).join("\n"));
+    }
+
+    assert.equal(runs[0], runs[1], "run 1 and 2 differ");
+    assert.equal(runs[1], runs[2], "run 2 and 3 differ");
+  } finally {
+    server.close();
   }
 });

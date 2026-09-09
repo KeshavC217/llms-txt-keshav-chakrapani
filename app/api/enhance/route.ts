@@ -171,7 +171,12 @@ export async function POST(request: Request) {
   // A file the AI could not help with is the deterministic one, which anyone
   // can have for free from the other endpoint; keeping it would fill the table
   // with rows that save nothing.
-  const stored = enhanced && issues.length === 0 && storeConfigured() ? await writeGeneration(url, llmsTxt) : false;
+  // A partial crawl is not stored. It is not the file the site would produce,
+  // and keeping it would serve a worse answer for a day and make the next
+  // change-detection comparison meaningless.
+  const complete = !crawl?.partial;
+  const stored =
+    enhanced && complete && issues.length === 0 && storeConfigured() ? await writeGeneration(url, llmsTxt) : false;
 
   return NextResponse.json({
     url: page.url,

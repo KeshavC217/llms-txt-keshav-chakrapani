@@ -10,7 +10,7 @@ interface Result {
   llmsTxt: string;
   source?: "published";
   publishedAt?: string;
-  crawl?: { pages: number; fetched: number; stoppedBy: string; fromSitemap: number; robotsDisallowed: number };
+  crawl?: { pages: number; planned: number; fetched: number; failed: number; fromSitemap: number; robotsDisallowed: number; partial: boolean };
   enhanced?: boolean;
   report?: { notesAccepted: number; notesRejected: number; sectionsRenamed: number; chunksFailed: number; guideModel: string; workerModel: string; reason?: string };
   spec?: { valid: boolean; issues: { line: number; message: string }[] };

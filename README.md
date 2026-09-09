@@ -222,10 +222,38 @@ it.
 are needed: `react.dev` answers 404 for `/sitemap.xml`, while `getlago.com` has a 282-URL sitemap
 containing not one `/docs` page.
 
-Four things end a crawl. Three are ours - a ceiling of 50 pages, a 20 second budget, and diminishing
-returns when 20 consecutive pages add no section that is new. The fourth belongs to the site: the
-pacer widens its interval on every 429, 503 or doubling of latency, never narrows within a crawl, and
-ends the crawl when it reaches its ceiling.
+### The same site gives the same file
+
+The crawl plans before it fetches, and that is what makes the output reproducible.
+
+It used to let the race decide: four workers pulled from a queue until fifty pages came back, so the
+fifty were whichever answered fastest. Two runs against an unchanged site produced different files -
+`vercel.com` and `docs.stripe.com` each drifted by a link, and the page count wobbled between 50 and
+52 because requests already in flight landed after the stop. That makes a content hash worthless for
+noticing real change, and quietly biases the file towards whatever a site serves quickest.
+
+Now selection is a pure function of what the site publishes - its sitemap in file order, and page
+links in document order - ranked by a total order with no ties, one section at a time. Fetching
+happens afterwards and cannot alter the list; results are sorted back into plan order, so a slow
+response changes when a page arrives and never whether it is included.
+
+Discovery still goes deeper than the first page, in waves: each wave is planned from the complete
+result of the one before, so following links stays deterministic. Without that, `react.dev` - which
+publishes no sitemap - would see only the 21 links on its home page instead of 50 pages.
+
+Measured, three runs each: `vercel.com`, `docs.stripe.com`, `getlago.com` and `react.dev` now
+produce byte-identical files. A test does the same against a fixture server that answers with random
+latency, so arrival order differs on every run and the output must not.
+
+What is still not deterministic is honest about itself. A crawl that hits the 25-second safety valve
+is marked `partial` and is not stored, because its contents depend on how fast the network was.
+Failures deliberately do not count as partial: a page failing twice is nearly always a stale sitemap
+entry that fails identically every run - `docs.stripe.com` loses one page and `getlago.com` two, and
+every run still hashes the same.
+
+The pacer belongs to the site rather than to us: it widens its interval on every 429, 503 or doubling
+of latency and never narrows within a crawl. It changes how fast the planned pages are fetched, not
+which they are.
 
 Politeness is not only manners. Measured on `getlago.com`, four workers with a 150ms gap fetched 30
 pages in **2.7s** with a p90 of 306ms; eight workers with no gap took **4.3s** with a p90 of

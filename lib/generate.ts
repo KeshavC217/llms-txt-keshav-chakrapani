@@ -20,7 +20,16 @@ export interface GenerateOptions {
 
 export interface GenerateResult {
   extraction: Extraction;
-  crawl?: { pages: number; fetched: number; stoppedBy: string; fromSitemap: number; robotsDisallowed: number };
+  crawl?: {
+    pages: number;
+    planned: number;
+    fetched: number;
+    failed: number;
+    fromSitemap: number;
+    robotsDisallowed: number;
+    /** The result is not the planned one, so it is a poor baseline for change. */
+    partial: boolean;
+  };
 }
 
 /**
@@ -55,10 +64,12 @@ export async function generate(html: string, url: string, options: GenerateOptio
     extraction,
     crawl: {
       pages: result.pages.length,
+      planned: result.planned,
       fetched: result.fetched,
-      stoppedBy: result.stoppedBy,
+      failed: result.failed,
       fromSitemap: result.fromSitemap,
       robotsDisallowed: result.robotsDisallowed,
+      partial: result.partial,
     },
   };
 }
