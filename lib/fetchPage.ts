@@ -19,8 +19,6 @@ export interface FetchedPage {
   isHtml: boolean;
   /** Set when the response is the site refusing us rather than the page. */
   block?: Block;
-  /** True when the page only came back after asking as a browser would. */
-  usedBrowserIdentity?: boolean;
 }
 
 const FETCH_TIMEOUT_MS = 15_000;
@@ -28,21 +26,8 @@ const MAX_BYTES = 2_000_000;
 const USER_AGENT = "llms-txt-generator/0.1 (+https://llmstxt.org)";
 
 /**
- * A second identity, used only after a site has refused the first.
- *
- * We say who we are to begin with, which is the courteous order and the one
- * that lets a site allow us deliberately. Some filters reject any agent they do
- * not recognise without looking further - zillow.com answers 403 to ours and
- * 200 to this one, for the same page - and for those, asking again as a browser
- * is the difference between a result and nothing. Set FETCH_IDENTIFY_ONLY=1 to
- * never take the second step.
- */
-const BROWSER_USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
-/**
- * Sent on both attempts. These describe what we can accept rather than
- * claiming to be anything, and some CDNs reject a request that omits them.
+ * These describe what we can accept rather than claiming to be anything, and
+ * some CDNs reject a request that omits them outright.
  */
 const COMMON_HEADERS = {
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -126,21 +111,7 @@ async function assertPublicUrl(url: string): Promise<void> {
 export async function fetchPage(url: string): Promise<FetchedPage> {
   await assertPublicUrl(url);
 
-  let attempt = await request(url, USER_AGENT);
-  let usedBrowserIdentity = false;
-
-  // Only retried when the refusal looks like a filter on who is asking. A
-  // challenge page would return the same challenge however we introduce
-  // ourselves, so trying again just spends another request to be told so.
-  if (attempt.block?.retryAsBrowser && process.env.FETCH_IDENTIFY_ONLY !== "1") {
-    const second = await request(url, BROWSER_USER_AGENT);
-    if (!second.block) {
-      attempt = second;
-      usedBrowserIdentity = true;
-    }
-  }
-
-  return { ...attempt, usedBrowserIdentity };
+  return request(url, USER_AGENT);
 }
 
 async function request(url: string, userAgent: string): Promise<FetchedPage> {

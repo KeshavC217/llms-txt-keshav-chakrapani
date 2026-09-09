@@ -9,9 +9,6 @@ test("a Cloudflare challenge is recognised by its header", () => {
   // Exactly what openai.com returns: 403, cf-mitigated: challenge.
   const block = detectBlock(403, headers({ "cf-mitigated": "challenge", server: "cloudflare" }), "<html></html>");
   assert.equal(block?.kind, "bot-challenge");
-  // Asking again as a browser returns the same challenge; only a browser that
-  // can run it helps.
-  assert.equal(block?.retryAsBrowser, false);
 });
 
 test("a challenge is recognised by its body when the header is absent", () => {
@@ -26,17 +23,14 @@ test("a challenge is recognised by its body when the header is absent", () => {
   }
 });
 
-test("a plain refusal is worth retrying as a browser", () => {
-  // zillow.com: 403 to our agent, 200 to a browser's, same page.
+test("a bare refusal is reported as a refusal, not as a challenge", () => {
   const block = detectBlock(403, headers({ server: "CloudFront" }), "<html><body>Access Denied</body></html>");
   assert.equal(block?.kind, "forbidden");
-  assert.equal(block?.retryAsBrowser, true);
 });
 
 test("a sign-in wall is not mistaken for a bot filter", () => {
   const block = detectBlock(403, headers(), "<html><body>Please sign in to continue</body></html>");
   assert.equal(block?.kind, "login-required");
-  assert.equal(block?.retryAsBrowser, false);
 });
 
 test("rate limiting is its own answer", () => {

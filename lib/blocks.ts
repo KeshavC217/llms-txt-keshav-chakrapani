@@ -26,8 +26,6 @@ export interface Block {
   kind: BlockKind;
   /** What to tell the person who typed the URL. */
   detail: string;
-  /** Whether presenting as a browser is likely to change the answer. */
-  retryAsBrowser: boolean;
 }
 
 /** Body text a challenge page carries and an ordinary page does not. */
@@ -69,26 +67,19 @@ export function detectBlock(status: number, headers: Headers, body: string): Blo
       // Solving it needs a real browser to run the script and hold the cookie,
       // which is a different tool from a fetch, not a header away.
       detail: "The site answered with an anti-bot challenge rather than the page.",
-      retryAsBrowser: false,
     };
   }
 
   if (status === 401 || (status === 403 && /sign in|log ?in|unauthorized/i.test(sample))) {
-    return { kind: "login-required", detail: "The page is behind a sign-in.", retryAsBrowser: false };
+    return { kind: "login-required", detail: "The page is behind a sign-in." };
   }
 
   if (status === 403) {
-    return {
-      kind: "forbidden",
-      // No challenge to solve, so this is a filter on who is asking - which is
-      // the one case where asking differently is worth a try.
-      detail: "The site refused the request.",
-      retryAsBrowser: true,
-    };
+    return { kind: "forbidden", detail: "The site refused the request." };
   }
 
   if (status === 429) {
-    return { kind: "rate-limited", detail: "The site is rate limiting requests.", retryAsBrowser: false };
+    return { kind: "rate-limited", detail: "The site is rate limiting requests." };
   }
 
   return null;
@@ -114,7 +105,6 @@ export function classifyEmpty(body: string): Block | null {
     return {
       kind: "bot-challenge",
       detail: "The site answered with a verification page instead of the page.",
-      retryAsBrowser: false,
     };
   }
   return null;

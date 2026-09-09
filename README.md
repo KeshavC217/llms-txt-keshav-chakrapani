@@ -125,14 +125,19 @@ different things:
 
 | what happens | example | what it needs |
 |---|---|---|
-| 403 to our agent, 200 to a browser's | `zillow.com` | different headers |
+| 403, no challenge | `zillow.com` (by address reputation) | nothing that a header can fix |
 | 403 with an anti-bot challenge | `openai.com`, `g2.com`, `medium.com`, `indeed.com` | a real browser, and often more |
 | 200 with an empty shell | `docs.convex.dev` | a real browser |
 
-**Headers.** We identify ourselves first, which is the courteous order and lets a site allow us
-deliberately. Only if that is refused with no challenge attached do we ask again as a browser would
-- `zillow.com` goes from 403 to 99 links on the second attempt. `FETCH_IDENTIFY_ONLY=1` turns the
-second attempt off.
+**Headers.** We send `Accept` and `Accept-Language`, which some CDNs require, and identify ourselves
+honestly in the User-Agent. We do not retry as a browser.
+
+That was tried and removed. `zillow.com` looked like the case for it - 403 to curl, a full page to
+us - until the difference turned out to be the HTTP client rather than the header: zillow refuses
+curl whatever User-Agent it sends, and served Node's fetch whatever User-Agent *it* sent, until
+repeated testing from one address turned that into a 403 as well. What varies is TLS fingerprint and
+address reputation, neither of which a header changes. Nothing in a thirty-site scan was helped by
+the swap, so the code went rather than shipping an impersonation that could not be shown to work.
 
 **Challenges are detected rather than fought.** `cf-mitigated: challenge`, `challenge-platform`,
 `_cf_chl` and their siblings are recognised from live responses, and the endpoint says which site
