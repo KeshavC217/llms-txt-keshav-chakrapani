@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { detectBlock, explain } from "../lib/blocks.ts";
+import { classifyEmpty, detectBlock, explain } from "../lib/blocks.ts";
 
 const headers = (values: Record<string, string> = {}) => new Headers(values);
 
@@ -75,4 +75,17 @@ test("each block explains itself in terms of what to do", () => {
 
   const limited = detectBlock(429, headers(), "")!;
   assert.match(explain(limited, "https://example.com/"), /rate limiting/i);
+});
+
+test("a challenge served with a 200 is caught once extraction finds nothing", () => {
+  // nature.com redirects to a page titled "Client Challenge" that answers 200
+  // and contains no content. Status alone misses it; the body alone would cry
+  // wolf on every Cloudflare-protected site that works.
+  assert.equal(classifyEmpty("<html><title>Client Challenge</title></html>")?.kind, "bot-challenge");
+  assert.equal(classifyEmpty('<html><script src="/cdn-cgi/challenge-platform/x"></script></html>')?.kind, "bot-challenge");
+});
+
+test("an ordinary page with nothing to link to is not called a challenge", () => {
+  // example.com: complete, server-rendered, simply has no internal links.
+  assert.equal(classifyEmpty("<html><h1>Example Domain</h1><p>For use in documentation.</p></html>"), null);
 });

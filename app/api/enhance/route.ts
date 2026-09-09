@@ -4,7 +4,7 @@ import { checkLlmAccess } from "@/lib/authGate";
 import { enhance } from "@/lib/ai/enhance";
 import { extract, linkCount } from "@/lib/naiveExtractor";
 import { fetchPage, normalizeUrl } from "@/lib/fetchPage";
-import { explain } from "@/lib/blocks";
+import { classifyEmpty, explain } from "@/lib/blocks";
 import { renderConfigured, renderPage } from "@/lib/render";
 import { aiConfigured } from "@/lib/ai/models";
 import { authConfigured } from "@/lib/supabase/config";
@@ -78,6 +78,22 @@ export async function POST(request: Request) {
   }
 
   let extraction = extract(page.body, page.url);
+  // Nothing extracted is worth a second look: some sites serve a challenge with
+  // a 200, which the status check above cannot see.
+  if (linkCount(extraction) === 0) {
+    const late = classifyEmpty(page.body);
+    if (late) {
+      const rendered = renderConfigured() ? await renderPage(page.url) : null;
+      if (!rendered) {
+        return NextResponse.json(
+          { error: explain(late, page.url), blocked: late.kind, url: page.url },
+          { status: 502 },
+        );
+      }
+      extraction = extract(rendered.html, page.url);
+    }
+  }
+
   if (extraction.clientRendered && renderConfigured()) {
     const rendered = await renderPage(page.url);
     if (rendered) {

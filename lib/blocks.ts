@@ -94,6 +94,32 @@ export function detectBlock(status: number, headers: Headers, body: string): Blo
   return null;
 }
 
+/**
+ * A second look, once extraction has found nothing.
+ *
+ * Status is not enough in either direction. crunchbase.com answers 200 with a
+ * real page and Cloudflare's scripts in it, so markers alone cry wolf; but
+ * nature.com answers 200 with a page titled "Client Challenge" and no content
+ * at all, so status alone misses a refusal that is plainly a refusal. What
+ * separates them is whether anything was actually delivered: a challenge has
+ * the markers AND nothing to read.
+ *
+ * Called only when the extractor found no links, so it cannot misjudge a page
+ * that worked.
+ */
+export function classifyEmpty(body: string): Block | null {
+  const sample = body.slice(0, 4000).toLowerCase();
+
+  if (CHALLENGE_MARKERS.some((marker) => sample.includes(marker)) || /client challenge|are you a robot/i.test(sample)) {
+    return {
+      kind: "bot-challenge",
+      detail: "The site answered with a verification page instead of the page.",
+      retryAsBrowser: false,
+    };
+  }
+  return null;
+}
+
 /** What the person who typed the URL should be told, and what they can do. */
 export function explain(block: Block, url: string): string {
   const host = (() => {
