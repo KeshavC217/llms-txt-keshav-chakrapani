@@ -9,6 +9,7 @@
     "lint": "eslint",
     "test": "node --test",
     "bench": "node scripts/bench.mjs",
+    "integration": "node scripts/integration.mjs",
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {

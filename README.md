@@ -221,6 +221,44 @@ spends reasoning tokens on trivial work and produced a 49.6-second outlier annot
 
 Measured end to end: 8-14 seconds a site, every note accepted, roughly a quarter of a cent.
 
+### Does the AI actually help?
+
+`npm run integration` answers that against sites which publish their own `llms.txt`. Those files are
+the ground truth this project otherwise lacks: a human, or a documentation platform, decided what
+belonged in them. Sampling from [llmstxt.site](https://llmstxt.site) gives real pages, chosen by
+someone other than us, with an answer key attached.
+
+For each site it generates both files and asks a cheap model to grade each against the published one.
+Eleven sites, seed 90210:
+
+| | coverage | descriptions | structure | total |
+|---|---|---|---|---|
+| deterministic | 2.18 | 1.91 | 2.91 | **7.00** |
+| AI-assisted | 2.45 | 2.64 | 3.45 | **8.55** |
+
+The run also measures its own error bar. The sieve cannot add or remove links, so both candidates
+point at exactly the same pages and any coverage difference is noise: it came out at **0.27**. So
+descriptions (+0.73) and structure (+0.55) are real, and the coverage "gain" of +0.27 is nothing -
+which is right, because nothing changed there. The AI improves the two things it is allowed to touch
+and leaves the rest alone.
+
+Absolute scores are low on purpose: the reference covers a whole site and we read one page. The
+number worth watching is the gap between our own two outputs, judged identically.
+
+**Choosing a judge is not about price.** Candidates were tested on one good and one deliberately poor
+file for the same reference, keeping whichever separated them furthest:
+
+| judge | good | bad | gap | speed | cost/1k |
+|---|---|---|---|---|---|
+| `nova-micro-v1` | 13/15 | 3/15 | **10** | 0.8s | $0.032 |
+| `gpt-oss-20b` | 12/15 | 3/15 | 9 | 6.5s | $0.071 |
+| `granite-4.0-h-micro` | 12/15 | 4/15 | 8 | 2.7s | $0.018 |
+| `mistral-nemo` | 13/15 | 9/15 | 4 | 3.7s | $0.013 |
+
+`mistral-nemo` is the cheapest and useless here: it gave a file with no descriptions and no real
+sections 9 out of 15. `qwen3.7-flash` and `ling-3.0-flash` returned nothing at all - both are
+reasoning models that spend the entire token budget thinking and answer with empty content.
+
 ## Accounts
 
 The generator is open to everyone. An account is only required for the LLM features, which cost
