@@ -2,75 +2,113 @@
 
 **Live: <https://llms-txt-keshav-chakrapani.vercel.app>**
 
-A tool that generates an [`llms.txt`](https://llmstxt.org) file for a website.
+A tool that generates an [`llms.txt`](https://llmstxt.org) file for a website, and keeps it up to
+date as the site changes.
 
-You enter a URL; the server fetches that one page and builds an `llms.txt` from it. There is no
-crawling — every line of the output comes from the single response, which is the constraint the
-current version is built under.
+You enter a URL. If the site publishes its own `llms.txt`, that is the answer and it costs one
+request. Otherwise the server crawls the site — sitemap and links, paced by what the site tolerates,
+obeying `robots.txt` — extracts what each page says about itself, groups the result into sections,
+runs two model passes over it, and stores what it produced. A scheduled job re-checks stored sites
+and rewrites the ones that have moved.
 
 ## Setup
 
 ```bash
 npm install
+cp .env.example .env    # then fill it in; see Environment below
 npm run dev
 ```
 
 Open <http://localhost:3000> and enter a URL.
 
+Nothing is strictly required to *run* the app, but the parts each variable switches on are not
+optional to the product:
+
+| without | what happens |
+|---|---|
+| `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` | there are no accounts, so generating answers 503 |
+| `SUPABASE_SECRET_KEY` | nothing is stored, so nothing is monitored and the saved list is empty |
+| `OPENROUTER_API_KEY` | the file is built deterministically, with no summary or per-link notes |
+
+A first run also needs the table: apply [`db/schema.sql`](db/schema.sql) in the Supabase SQL editor.
+
 ## How it works
 
 ```
 TEMPLATE.txt             the target shape, and the rules the extractor follows
+db/schema.sql            the one table, and the two migrations that grew it
 app/
-  page.tsx               URL input, result preview, download
-  api/generate/route.ts  POST { url } -> fetch -> guard -> build
-proxy.ts                 refreshes the Supabase session on every request
-app/
+  page.tsx               the saved list, server-rendered; Generator.tsx is the client half
   login/                 email + password sign-in
+  api/generate/route.ts  POST { url } -> published? -> crawl -> models -> store
+  api/saved/route.ts     GET the saved list, or one file. No account needed.
+  api/refresh/route.ts   POST, cron-authenticated: re-check what is due
+proxy.ts                 refreshes the Supabase session (Next 16's middleware)
 lib/
-  authGate.ts            who may use the LLM features
-  supabase/              browser, server and config clients
+  fetchPage.ts           one page, with the SSRF guard and the block detector
+  blocks.ts              telling a challenge page from a real one
+  published.ts           finding and recognising a site's own llms.txt
+  crawl/
+    crawl.ts             the crawl itself: discover, plan, fetch, collect
+    plan.ts              what to fetch, decided before anything is fetched
+    sitemap.ts           sitemap and sitemap-index discovery
+    robots.ts            parsing robots.txt and applying it
+    pacer.ts             how fast this site is willing to be asked
+    url.ts               one address per page
+  pageMeta.ts            what a crawled page says about itself
+  buildFromCrawl.ts      crawled pages -> the same Extraction shape
+  grouping.ts            links -> sections
+  naiveExtractor.ts      a page -> { siteName, summary, sections } -> llms.txt
   dom.ts                 HTML -> a small tree that can be measured
   nlp.ts                 tokenizing, stemming, overlap, sentence splitting
-  naiveExtractor.ts      the tree -> { siteName, summary, sections } -> llms.txt
+  ai/                    the guide pass, the annotation pass, and the sieve
   spec.ts                the llmstxt.org grammar: escaping out, parsing back
+  monitor.ts             fingerprints and the per-site check interval
+  store.ts               the generations table
 tests/
   fixtures.ts            mock pages, one per genre the extractor meets
   *.test.ts              node:test suites, run with `npm test`
 ```
 
-`POST /api/generate` takes `{ "url": "example.com" }` and returns:
+`POST /api/generate` takes `{ "url": "example.com", "regenerate": false }` and returns:
 
 ```json
 {
   "url": "https://example.com/",
-  "status": 200,
-  "contentType": "text/html; charset=utf-8",
-  "truncated": false,
-  "llmsTxt": "# Example Domain\n\n> ...\n\n## Subpages\n\n## Content\n..."
+  "llmsTxt": "# Example\n\n> ...\n\n## Docs\n\n- [Quickstart](...): ...\n",
+  "crawl": { "pages": 50, "planned": 49, "failed": 0, "partial": false },
+  "report": { "notesAccepted": 44, "sectionsRenamed": 3, "chunksFailed": 0 },
+  "spec": { "valid": true, "issues": [] },
+  "stored": true
 }
 ```
+
+Three other shapes come back from the same endpoint: a stored file (`saved: true`, with
+`generatedAt`), a site's own file (`source: "published"`, with `publishedAt`), and a refusal
+(`blocked`, with the kind of block). `regenerate: true` skips both short circuits and crawls.
 
 `TEMPLATE.txt` defines what is being aimed at, generalized from the spec at
 [llmstxt.org](https://llmstxt.org) and from 22 files sampled off
 [llmstxt.site](https://llmstxt.site). The generated file is:
 
 ```
-# Title                      og:title, then <title>, then <h1>, then the hostname
-> description                meta description, og: or twitter: variants
-Source: https://example.com/
+# Site name                  og:site_name, og:title, <title>, <h1>, then the hostname
+> one-sentence summary       meta description, og:/twitter: variants, or the AI guide pass
 
-## Subpages
-- [label](url)               every same-host <a href>, in document order
+orienting prose              optional, and omitted rather than padded
 
-## Content
-...                          the page's own text, headings and list items kept
+## Section name              a nav heading, or the shared path segment
+- [title](url): note         the page's own <title> and description, or an AI note
+
+## Optional                  pages that exist but are rarely what an agent came for
+- [title](url): note
 ```
 
 ### What the extractor infers
 
-It is naive in that it sees one document: no crawl, no model, no fetching the pages it links to.
-Everything is inferred from structure and word overlap.
+The extractor sees one document at a time and no model. It runs first on the page you gave, which
+supplies the site name, the summary and the orienting prose; the crawl then feeds it every other
+page. Everything here is inferred from structure and word overlap.
 
 - **Boilerplate.** Link density decides what is navigation: a nav is nearly all link text, a
   paragraph is nearly none. Chrome is read for its *links* and discarded for its prose, so menus
@@ -111,9 +149,9 @@ rejected, and eight hostile pages run through the real pipeline. CI runs it on e
 adversarial cases earned their place - they caught a bug where correctly escaped `\[draft\]` was
 rejected by the validator's own regex.
 
-Two things the spec recommends that a single fetch cannot honestly do. It asks that links point at
-markdown versions of pages; we cannot know a `.md` twin exists without fetching it, and inventing
-those URLs would mean emitting links we have never seen. And where a page advertises
+Two things the spec recommends that this does not do. It asks that links point at markdown versions
+of pages; we cannot know a `.md` twin exists without fetching it, and inventing those URLs would
+mean emitting links we have never seen. And where a page advertises
 `rel="alternate" type="text/markdown"` or `rel="describedby"`, that is reported rather than acted
 on - a markdown twin for the fetched page says nothing verifiable about the pages it links to. If a
 site already publishes its own llms.txt, the UI says so: theirs is authoritative.
@@ -176,9 +214,22 @@ only count when the status says we were refused.
 
 ### Known limits
 
-Most links carry no note. A single page rarely says anything about the pages it links to, and the
-template's rule is to omit rather than invent — filling that slot properly means fetching the
-targets, which this deliberately does not do.
+**Nothing ranks pages by importance.** Within a section the plan orders by depth, then sitemap
+position, then alphabetically. With 4,693 candidates on `docs.stripe.com` and a budget of 50, that
+is the difference between a useful file and an arbitrary one, and it is what holds the coverage
+score down. The signals to fix it are already in hand and unused: whether the home page links to a
+page, its prominence in the nav, how many crawled pages link to it, its depth, whether it carries a
+description of its own.
+
+**A slow site can outlast the function.** The whole request - fetch, crawl, two model passes - has
+to finish inside Vercel's 60 seconds. The crawl has its own 25-second valve, but nothing budgets the
+request end to end, so a site as slow as `news.ycombinator.com` (61s locally, 8 of 49 pages) hits
+the platform limit and the caller gets a timeout rather than a partial answer.
+
+**A link with no note is left without one.** The template's rule is to omit rather than invent. The
+crawl fetches every page it lists, so most links now carry the page's own description; where a site
+sets one boilerplate description for its whole domain, that is detected and dropped rather than
+repeated down the file, and the models fill the gap or nothing does.
 
 A client-rendered page yields nothing, and says so rather than pretending: `docs.convex.dev`
 returns a 4 KB shell with one anchor, and the output states that the links need JavaScript that a
@@ -269,11 +320,15 @@ pages in **2.7s** with a p90 of 306ms; eight workers with no gap took **4.3s** w
 | docs.stripe.com | 45 -> 52 | 1 -> 30 |
 | modal.com | - -> 67 | - -> 28 |
 
-Measured against files real sites publish (`npm run integration`, 11 sites), the deterministic output
-went from **7.00/15 to 8.00**, its descriptions from 1.91 to 2.64. The AI-assisted output moved much
-less, from 8.55 to 8.73 - the sieve had been compensating for the missing descriptions, and now has
-better raw material rather than more work to do. Coverage barely moved and remains the weak axis:
-fifty pages is not a whole site.
+Measured against files real sites publish (`npm run integration`), reading the site rather than the
+page took the deterministic output from **7.00/15 to 8.00** and its descriptions from 1.91 to 2.64.
+The AI-assisted output moved much less, 8.55 to 8.73 - the sieve had been compensating for the
+missing descriptions and now has better raw material rather than more work to do. Coverage barely
+moved and remains the weak axis: fifty pages is not a whole site.
+
+Those four numbers are the last measurement taken while there were two outputs to compare, kept
+because the comparison is the point. The current figure, one endpoint and a different sample, is
+under [Is the output any good?](#is-the-output-any-good) below.
 
 ### Three things testing changed
 
@@ -292,9 +347,12 @@ description repeated across a fifth of the crawl is dropped, and the home page's
 
 ## The AI sieve
 
-`POST /api/enhance` is the model-assisted path: everything `/api/generate` does, then two model
-passes over the result. It is a separate endpoint because it differs in all three ways that matter -
-it needs an account, it spends money, and it takes seconds rather than milliseconds.
+Two model passes run over every crawl, inside `/api/generate`.
+
+They used to live behind a second endpoint, `/api/enhance`, with the first serving a free
+deterministic file. That is gone: two routes did the same work up to the last step, returned two
+different answers for the same URL, and put a toggle in front of people asking them to choose
+between a good file and a better one. `lib/ai/enhance.ts` is the pass; there is one endpoint.
 
 **Stage one, the guide.** One call carrying the whole skeleton, returning a site summary and a
 better name for each section. This is the global judgment, made once however many links there are.
@@ -319,7 +377,11 @@ the spec, so rejecting is always safe: a dropped note leaves a link without one,
 file and still a valid one.
 
 The endpoint reports what survived (`notesAccepted`, `notesRejected`, `sectionsRenamed`,
-`chunksFailed`), so a model that is quietly doing nothing is visible rather than inferred.
+`chunksFailed`), so a model that is quietly doing nothing is visible rather than inferred. The
+interface says it in words: *"44 notes, 3 sections renamed"*, not *"AI enabled"*.
+
+With no `OPENROUTER_API_KEY` the passes are skipped and the deterministic file is served, which is
+also what happens when the models return nothing usable.
 
 ### When a call fails
 
@@ -363,29 +425,32 @@ spends reasoning tokens on trivial work and produced a 49.6-second outlier annot
 
 Measured end to end: 8-14 seconds a site, every note accepted, roughly a quarter of a cent.
 
-### Does the AI actually help?
+### Is the output any good?
 
 `npm run integration` answers that against sites which publish their own `llms.txt`. Those files are
 the ground truth this project otherwise lacks: a human, or a documentation platform, decided what
 belonged in them. Sampling from [llmstxt.site](https://llmstxt.site) gives real pages, chosen by
 someone other than us, with an answer key attached.
 
-For each site it generates both files and asks a cheap model to grade each against the published one.
-Eleven sites, seed 90210:
+Eight sites, seed 90210, judged by `nova-micro-v1`:
 
-| | coverage | descriptions | structure | total |
-|---|---|---|---|---|
-| deterministic | 2.18 | 1.91 | 2.91 | **7.00** |
-| AI-assisted | 2.45 | 2.64 | 3.45 | **8.55** |
+| coverage | descriptions | structure | total |
+|---|---|---|---|
+| 2.13 | 3.44 | 3.13 | **8.69** / 15 |
 
-The run also measures its own error bar. The sieve cannot add or remove links, so both candidates
-point at exactly the same pages and any coverage difference is noise: it came out at **0.27**. So
-descriptions (+0.73) and structure (+0.55) are real, and the coverage "gain" of +0.27 is nothing -
-which is right, because nothing changed there. The AI improves the two things it is allowed to touch
-and leaves the rest alone.
+All eight conformed to the grammar. Median time to generate was 26 seconds.
 
-Absolute scores are low on purpose: the reference covers a whole site and we read one page. The
-number worth watching is the gap between our own two outputs, judged identically.
+**Coverage is the weak axis and the honest one.** The reference describes a whole site; we crawl
+fifty pages. Nothing in the pipeline yet asks which fifty *matter* - within a section the plan
+orders by depth, then sitemap position, then alphabetically - so on a large site the budget is spent
+arbitrarily rather than badly. That is the next thing worth building, and it is why descriptions and
+structure score a point and a half higher than coverage does.
+
+**The error bar is measured rather than assumed.** This used to grade two candidates - a free
+deterministic file and the AI-assisted one - and the number that mattered was the gap between them.
+With one endpoint there is one candidate, so instead every file is graded twice by the same judge at
+temperature 0, and the disagreement between those gradings is the noise floor: **0.63 / 15**. Any
+change smaller than that means nothing.
 
 **Choosing a judge is not about price.** Candidates were tested on one good and one deliberately poor
 file for the same reference, keeping whichever separated them furthest:
@@ -420,25 +485,83 @@ guarding.
 It is not a cache and has no expiry. A saved file is what that site's llms.txt *is*, until something
 replaces it: a person asking for a fresh one, or the scheduled check noticing the site moved.
 
-```sql
-create table public.generations (
-  url          text primary key,
-  llms_txt     text        not null,
-  content_hash text        not null,
-  generated_at timestamptz not null default now()
-);
+The table is [`db/schema.sql`](db/schema.sql): the four original columns, the seven the monitor
+added, and `source`/`published_at` for telling a site's own file from ours. It is idempotent, so it
+doubles as the migration for a deployment that predates either change.
 
-alter table public.generations enable row level security;
-create index generations_generated_at_idx on public.generations (generated_at);
-```
+`lib/store.ts` tolerates an older schema on purpose - selecting a column PostgREST does not know
+about returns *nothing at all* rather than a partial row, which emptied the saved list the first
+time this was deployed ahead of its migration - so every read asks for the full set and falls back
+to the original four. That is a safety net for the window between a deploy and a migration, not a
+reason to skip running the file.
 
 RLS is enabled with **no policies at all**, so the publishable key can neither read nor write:
 verified against the live project, a browser-key read returns zero rows and a browser-key insert is
 refused with *"new row violates row-level security policy"*. Everything goes through the server using
 `SUPABASE_SECRET_KEY`, which bypasses RLS and never leaves it.
 
-A site that publishes its own llms.txt gets that returned instead, and it is **not** saved: it is
-already published at its own address, and one request fetches it again.
+A site that publishes its own llms.txt is saved too, with `source: "published"` and the address it
+was read from. Marked rather than merged: the saved list says which files this project wrote and
+which it merely found, and the scheduled check knows to re-read their file rather than crawl the
+site and replace someone's curation with our guess.
+
+## Keeping it up to date
+
+A file that was right when it was generated is wrong the moment the site is reorganised, so stored
+sites are re-checked on a schedule and the ones that moved are rewritten.
+
+**Work is done cheapest first**, because most checks find nothing:
+
+| tier | cost | what it settles |
+|---|---|---|
+| the site's own `llms.txt`, if the row is one | 1 request | did their file change |
+| the sitemap's fingerprint | 1 request | did the page list change |
+| a crawl, fingerprinted without any model | ~9s | did the structure change |
+| regenerate | ~30s | write the new file |
+
+A tier only runs when the one above it was inconclusive. A sitemap that has not moved settles a site
+in about half a second, which is what makes checking hundreds of sites affordable.
+
+**Each site carries its own interval.** It halves when a check finds a change and grows by half when
+it does not, bounded by `MONITOR_MIN_INTERVAL_HOURS` (1) and `MONITOR_MAX_INTERVAL_HOURS` (168). A
+docs site that ships daily converges on being checked daily; a static marketing page drifts out to
+weekly. A row that has never been fingerprinted records its first one as a *baseline* rather than a
+change — otherwise every pre-existing row would halve its interval on the first pass and be watched
+twice as closely for having been there longest.
+
+**The loop lives in GitHub Actions, the crawling lives on Vercel.** `.github/workflows/monitor.yml`
+calls `POST /api/refresh` until it reports nothing left due. A serverless function on this plan is
+killed at 60 seconds, so one call can only handle a slice of the queue; the runner has six hours.
+The crawling deliberately stays on the deployment - that is where the credentials already are, and
+requests from a shared CI address are far more likely to meet an anti-bot challenge than requests
+from the app's own host.
+
+To set it up, add two repository secrets:
+
+```
+APP_URL       https://your-deployment.vercel.app
+CRON_SECRET   the same value as the deployment's CRON_SECRET (openssl rand -hex 32)
+```
+
+`/api/refresh` compares the bearer token in constant time and answers 401 without one. Run it by
+hand from the Actions tab (`workflow_dispatch`) rather than waiting for the schedule.
+
+**The schedule is a ceiling, not a promise.** The cron reads `2-59/5` - every five minutes, offset
+off the hour because GitHub documents that scheduled events are delayed under load and that "high
+load times include the start of every hour". In practice a low-activity repository sees far fewer:
+this one has been running roughly every four hours. GitHub also disables schedules on repositories
+with no activity for 60 days, without saying so. Anything that has to be reliable belongs on a real
+scheduler; this is the free one.
+
+**A run is bounded by expense, not by a count of sites.** `MONITOR_CHECKS_PER_RUN` (40) and
+`MONITOR_REGENERATIONS_PER_RUN` (2) are separate because the two cost two orders of magnitude apart,
+and a run declines to *begin* a regeneration it has not the time to finish - the first live run took
+69 seconds and would have been killed mid-write. A regeneration that gets deferred deliberately does
+not record the new sitemap fingerprint: recording it would make the next run's cheap tier say
+"unchanged" and the change would be lost.
+
+**A partial crawl is never recorded.** One cut short by its safety valve depends on how fast the
+network was, and comparing against it would report a change every run.
 
 ## Accounts
 
@@ -461,8 +584,15 @@ wrong and there is no account for them to sign in to.
 ## Tests
 
 ```bash
-npm test        # node --test, no framework and no dependencies
+npm test          # 139 tests, node --test, no framework and no dependencies
+npm run lint
+npm run typecheck
 ```
+
+All three run in CI on every pull request. Two more need a key and a network, so they do not:
+`npm run bench` times the candidate models, and `npm run integration` grades the output against
+sites that publish their own file (it needs `npm run dev` in another terminal and the
+`TEST_ACCOUNT_*` credentials, since generating is gated).
 
 Node 24 runs TypeScript directly, so the suites are `.ts` and import the modules they test. That is
 why `lib` modules import each other by full filename (`./dom.ts`) and why type-only imports carry an
@@ -474,6 +604,11 @@ site with a sidebar and cards, a marketing site reaching one page by four URLs, 
 shell, locale-prefixed paths, a chrome-heavy page, and deliberately malformed markup. Several encode
 a specific bug found against live sites, so a regression has somewhere to fail loudly.
 
+**What is not covered:** every test is on library code. No test exercises an API route, so the auth
+gate, the published-file short circuit and the refresh budget arithmetic have been verified by hand
+against the deployment rather than automatically - which is exactly the checking that should stop
+being manual first.
+
 Writing them found five real defects: `<p>` inside a `<div>` closed the `<div>` (the implicit-close
 table was keyed backwards), `stem("guides")` did not match `stem("guide")`, `stripBrandSuffix` left
 a two-word brand in place, deduping a link kept the nav copy and threw away the card's description,
@@ -481,9 +616,20 @@ and a card description was repeated as orienting prose.
 
 ## Environment
 
-Nothing is required to run the passthrough. `.env.example` documents the variables the fuller
-version will use as it gets rebuilt (Supabase for persistence, OpenRouter for an LLM pass, a cron
-secret for scheduled updates).
+[`.env.example`](.env.example) documents every variable with what it does and where to get it.
+The short version:
+
+| variable | what it switches on |
+|---|---|
+| `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | accounts; without them generating answers 503 |
+| `SUPABASE_SECRET_KEY` | the store, and therefore monitoring. Server only, never `NEXT_PUBLIC_` |
+| `OPENROUTER_API_KEY` | the summary, the section names and the per-link notes |
+| `CRON_SECRET` | `POST /api/refresh`; without it the endpoint refuses everything |
+| `RENDER_ENDPOINT` | a browser for pages whose links only exist after JavaScript |
+| `ALLOW_PRIVATE_CRAWL_TARGETS` | testing against a local server, past the SSRF guard |
+
+The crawl and monitor tunables (`CRAWL_MAX_PAGES`, `MONITOR_*`) have working defaults and are
+documented in `.env.example` beside the reasoning for each.
 
 ## Deployment
 
@@ -503,14 +649,8 @@ not have written. Pinning Node alone is not enough, because its bundled npm move
 releases - a lock written by 11.6.2 met a runner carrying 11.19.1 and the install failed. Regenerate
 the lock with `npx npm@11.19.1 install`, matching the version in `ci.yml`.
 
-## History
+## Reading the history
 
-The full implementation — crawler with sitemap/robots/nav parsing, headless-browser fallback for
-JS-rendered pages, deterministic sectioning, a constrained LLM copyedit pass, Supabase
-persistence, change detection and scheduled re-crawls — is preserved at the tag
-[`v1-full-generator`](https://github.com/KeshavC217/llms-txt-keshav-chakrapani/releases/tag/v1-full-generator).
-
-```bash
-git show v1-full-generator:lib/crawler.ts   # read a file from it
-git diff v1-full-generator                  # what was removed
-```
+`SEQUENCE.md` lists what was built in what order and why, one entry per merged PR. It is the
+narrative the commit log cannot carry - including the two decisions that were made and then reversed
+after testing failed to support them.

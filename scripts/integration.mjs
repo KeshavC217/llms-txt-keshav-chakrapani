@@ -6,10 +6,15 @@
  * from https://llmstxt.site gives real pages, chosen by someone other than us,
  * with an answer key attached.
  *
- * For each site it generates both files - deterministic and AI-assisted - and
- * asks a cheap model to compare each against the published one. The interesting
- * number is not the absolute score, which is a model's opinion, but the gap
- * between our two outputs on the same page, judged the same way.
+ * For each site it generates our file and asks a cheap model to compare it
+ * against the published one.
+ *
+ * This used to grade two candidates - a free deterministic file and the
+ * AI-assisted one - and the interesting number was the gap between them rather
+ * than either absolute score. There is one endpoint now, so there is one
+ * candidate, and the A/B is gone. What replaces it as the error bar: every
+ * candidate is graded twice, and the disagreement between those two gradings
+ * is how much of any difference in the table is the judge rather than us.
  *
  * Deliberately not part of `npm test`: it needs a key, a network, a running
  * dev server and an account, takes minutes, and its results move with whoever
@@ -71,7 +76,7 @@ function shuffled(items, seed) {
   return [...items].sort(() => random() - 0.5);
 }
 
-/** Signs in as the test account; /api/enhance is gated and should stay that way. */
+/** Signs in as the test account: generating is gated and should stay that way. */
 async function sessionCookie() {
   const url = need("SUPABASE_URL");
   const response = await fetch(`${url.replace(/\/$/, "")}/auth/v1/token?grant_type=password`, {
@@ -97,9 +102,9 @@ async function sampleSites(count, seed) {
   return shuffled(links, seed).slice(0, count);
 }
 
-async function ours(path, url, cookie) {
+async function ours(url, cookie) {
   const started = performance.now();
-  const response = await fetch(`${BASE}${path}`, {
+  const response = await fetch(`${BASE}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
     // regenerate: the endpoint now hands back a site's own llms.txt when it
@@ -128,7 +133,7 @@ const JUDGE_SYSTEM = [
   "coverage - does it point at the same important pages as the reference;",
   "descriptions - are its per-link notes specific and informative rather than absent or empty;",
   "structure - is it organised the way the reference is, with meaningful section names.",
-  "Judge only what is present. The candidate is built from ONE page, so breadth beyond that page is not expected.",
+  "Judge only what is present. The candidate is built from a crawl capped at 50 pages, so a reference covering a whole site will always be broader.",
   'Reply with JSON only: {"coverage":n,"descriptions":n,"structure":n,"comment":"<12 words>"}',
 ].join(" ");
 
@@ -180,49 +185,59 @@ for (const llmsUrl of sites) {
     continue;
   }
 
-  const plain = await ours("/api/generate", origin, null);
-  if (!plain.ok || !plain.text) {
+  const mine = await ours(origin, cookie);
+  if (!mine.ok || !mine.text) {
     // Not a wasted row: a page we cannot read at all is the finding.
-    console.log(`FETCH FAILED - ${plain.error ?? "no output"}`);
-    rows.push({ host, failed: plain.error ?? "no output" });
+    console.log(`FAILED - ${mine.error ?? "no output"}`);
+    rows.push({ host, failed: mine.error ?? "no output" });
     continue;
   }
 
-  const assisted = await ours("/api/enhance", origin, cookie);
-  const [plainScore, assistedScore] = await Promise.all([
-    judge(reference, plain.text),
-    assisted.ok && assisted.text ? judge(reference, assisted.text) : null,
-  ]);
+  // Graded twice, same input, same temperature. Anything the two disagree on
+  // is the judge's own variance, and that is the floor below which a change in
+  // the table below means nothing.
+  const [first, second] = await Promise.all([judge(reference, mine.text), judge(reference, mine.text)]);
+  if (!first || !second) {
+    console.log(`UNGRADED - the judge returned nothing usable`);
+    rows.push({ host, failed: "judge returned nothing" });
+    continue;
+  }
 
-  const total = (s) => (s ? s.coverage + s.descriptions + s.structure : 0);
-  rows.push({ host, plain: plainScore, assisted: assistedScore, notes: assisted.report?.notesAccepted ?? 0 });
+  const total = (s) => s.coverage + s.descriptions + s.structure;
+  rows.push({ host, first, second, notes: mine.report?.notesAccepted ?? 0, ms: mine.ms, spec: mine.spec });
 
   console.log(
-    `plain ${total(plainScore)}/15  assisted ${total(assistedScore)}/15  ` +
-      `(+${total(assistedScore) - total(plainScore)})  notes ${assisted.report?.notesAccepted ?? 0}  ` +
-      `${assistedScore?.comment ?? assisted.error ?? ""}`,
+    `${total(first)}/15  ${mine.ms}ms  notes ${mine.report?.notesAccepted ?? 0}  ` +
+      `${mine.spec ? "conforms" : "DOES NOT CONFORM"}  ${first.comment ?? ""}`,
   );
 }
 
-const scored = rows.filter((r) => r.plain && r.assisted);
-const by = (row, field) => row[field];
+const scored = rows.filter((r) => r.first && r.second);
 console.log(`\n${"".padEnd(30)} ${"coverage".padStart(9)} ${"descript".padStart(9)} ${"structure".padStart(9)} ${"total".padStart(7)}`);
 
-for (const which of ["plain", "assisted"]) {
-  const c = mean(scored.map((r) => by(r, which).coverage));
-  const d = mean(scored.map((r) => by(r, which).descriptions));
-  const s = mean(scored.map((r) => by(r, which).structure));
-  console.log(`${which.padEnd(30)} ${c.toFixed(2).padStart(9)} ${d.toFixed(2).padStart(9)} ${s.toFixed(2).padStart(9)} ${(c + d + s).toFixed(2).padStart(7)}`);
-}
+const axis = (field) => mean(scored.map((r) => (r.first[field] + r.second[field]) / 2));
+const [c, d, st] = ["coverage", "descriptions", "structure"].map(axis);
+console.log(`${"generated".padEnd(30)} ${c.toFixed(2).padStart(9)} ${d.toFixed(2).padStart(9)} ${st.toFixed(2).padStart(9)} ${(c + d + st).toFixed(2).padStart(7)}`);
 
-// The sieve cannot add or remove links, so both candidates point at exactly the
-// same pages. Any difference the judge reports on coverage is therefore noise,
-// and its size is the error bar on everything else in this table.
-const noise = mean(scored.map((r) => Math.abs(r.plain.coverage - r.assisted.coverage)));
-console.log(
-  `\njudge noise: ${noise.toFixed(2)} on coverage, which is identical by construction ` +
-    `(the sieve cannot change links) - treat smaller gaps than this as nothing.`,
+// The same file, graded twice by the same judge at temperature 0. Whatever it
+// disagrees with itself about is the error bar on every number above.
+const noise = mean(
+  scored.map((r) =>
+    Math.abs(r.first.coverage - r.second.coverage) +
+    Math.abs(r.first.descriptions - r.second.descriptions) +
+    Math.abs(r.first.structure - r.second.structure),
+  ),
 );
+console.log(
+  `\njudge noise: ${noise.toFixed(2)}/15 between two gradings of the same file - ` +
+    `treat any change smaller than this as nothing.`,
+);
+
+const nonConforming = scored.filter((r) => r.spec === false);
+if (nonConforming.length) {
+  console.log(`\nDid not conform to llmstxt.org (${nonConforming.length}/${scored.length}):`);
+  for (const row of nonConforming) console.log(`  ${row.host}`);
+}
 
 const failed = rows.filter((r) => r.failed);
 if (failed.length) {

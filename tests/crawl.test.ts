@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { ALLOW_ALL, isAllowed, parseRobots } from "../lib/crawl/robots.ts";
 import { sitemapCandidates } from "../lib/crawl/sitemap.ts";
-import { Frontier, canonicalize } from "../lib/crawl/frontier.ts";
+import { canonicalize } from "../lib/crawl/url.ts";
 import { Pacer } from "../lib/crawl/pacer.ts";
 import { readPage } from "../lib/pageMeta.ts";
 import { findPublished, publishedCandidates } from "../lib/published.ts";
@@ -98,29 +98,6 @@ test("assets and other schemes are not pages", () => {
   for (const href of ["/logo.png", "/app.js", "/feed.xml", "mailto:a@b.com", "javascript:void(0)"]) {
     assert.equal(canonicalize(href, "https://x.com/"), null, href);
   }
-});
-
-test("the frontier refuses duplicates, other hosts, and disallowed paths", () => {
-  const frontier = new Frontier({ origin: "https://x.com", isAllowed: (path) => !path.startsWith("/private") });
-
-  assert.equal(frontier.add("/a", "https://x.com/", 0), true);
-  assert.equal(frontier.add("https://x.com/a/", "https://x.com/", 0), false, "same page, second form");
-  assert.equal(frontier.add("https://other.com/a", "https://x.com/", 0), false, "different host");
-  assert.equal(frontier.add("/private/x", "https://x.com/", 0), false, "robots");
-  assert.equal(frontier.pending, 1);
-});
-
-test("prefix filters include and exclude", () => {
-  const frontier = new Frontier({
-    origin: "https://x.com",
-    include: ["/docs"],
-    exclude: ["/docs/legacy"],
-    isAllowed: () => true,
-  });
-
-  assert.equal(frontier.add("/docs/guide", "https://x.com/", 0), true);
-  assert.equal(frontier.add("/blog/post", "https://x.com/", 0), false);
-  assert.equal(frontier.add("/docs/legacy/old", "https://x.com/", 0), false);
 });
 
 test("the pacer widens when refused and never narrows again", () => {
@@ -308,6 +285,39 @@ test("two crawls of an unchanged site produce the same pages, in the same order"
 
     assert.equal(runs[0], runs[1], "run 1 and 2 differ");
     assert.equal(runs[1], runs[2], "run 2 and 3 differ");
+  } finally {
+    server.close();
+  }
+});
+
+test("prefix filters keep a crawl inside a section", async () => {
+  // These were covered against a class that no longer runs anything. The
+  // capability is real - crawl.ts applies both when it considers a URL - so
+  // the test now goes through the crawler itself.
+  const page = (title: string, links: string[] = []) =>
+    `<html><head><title>${title}</title></head><body>${links
+      .map((href) => `<a href="${href}">${href}</a>`)
+      .join("")}</body></html>`;
+
+  const pages: Record<string, string> = {
+    "/": page("Home", ["/docs/guide", "/docs/legacy/old", "/blog/post"]),
+    "/docs/guide": page("Guide"),
+    "/docs/legacy/old": page("Old"),
+    "/blog/post": page("Post"),
+    "/robots.txt": "",
+  };
+
+  const server = await jitteryServer(pages);
+  try {
+    const result = await crawl(server.origin, {
+      userAgent: "test",
+      seed: { url: `${server.origin}/`, html: pages["/"] },
+      include: ["/docs"],
+      exclude: ["/docs/legacy"],
+    });
+
+    const paths = result.pages.map((p) => new URL(p.url).pathname).sort();
+    assert.deepEqual(paths, ["/", "/docs/guide"], "excluded and out-of-prefix pages must not be fetched");
   } finally {
     server.close();
   }

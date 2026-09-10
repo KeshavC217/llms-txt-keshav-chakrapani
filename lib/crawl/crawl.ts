@@ -13,7 +13,7 @@
  */
 
 import { readPage, type PageMeta } from "../pageMeta.ts";
-import { canonicalize } from "./frontier.ts";
+import { canonicalize } from "./url.ts";
 import { type Candidate, planCrawl } from "./plan.ts";
 import { Pacer } from "./pacer.ts";
 import { fetchRobots, isAllowed, type Robots } from "./robots.ts";
