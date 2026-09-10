@@ -8,7 +8,7 @@
  */
 
 import type { LinkEntry, Section } from "./naiveExtractor.ts";
-import { similarity, titleCase } from "./nlp.ts";
+import { coverage, similarity, titleCase } from "./nlp.ts";
 
 /** Locale segments name an audience, not a section: /docs/en/... is not "En". */
 export const LOCALE_SEGMENT =
@@ -83,7 +83,102 @@ export function tidyLabel(label: string, fallback: string, siteName?: string): s
  * section, there is a limit to how many sections earn their heading, and a
  * section past a couple of dozen links has stopped being a curated list.
  */
-export function curate(sections: Section[]): Section[] {
+/**
+ * One entry per page, where the query string is a variant rather than the page.
+ *
+ * airbnb.com linked its gift-card page ten times - /gift/buy?card_name=arctic,
+ * &baths, &cozy, &dinner - and an entire section of the generated file was one
+ * page under ten spellings. Two "Contact us" differing only by ?entry= sat
+ * beside them.
+ *
+ * The query cannot simply be dropped: en.wikipedia.org addresses every article
+ * as /w/index.php?title=X, so collapsing on path alone would fold a whole
+ * encyclopedia into one link. What separates the two cases is the title, which
+ * the crawler has because it fetched the page - ten identical "Airbnb gift
+ * cards" against ten different article names. So: same path and same title is
+ * one page; same path and different titles is several.
+ *
+ * The survivor is the one that says the most - a note first, then the shortest
+ * URL, which is the one without the variant attached.
+ */
+/** The address without the query, which is where a variant hides. */
+function pathKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Whether two links at the same address are the same page.
+ *
+ * Not string equality. The same page arrives under a long title and a short
+ * one, because one came from the page's own <title> and the other from the
+ * text of a link to it: nytimes.com offered both "Connections" and
+ * "Connections - Group words that share a common thread". One title being
+ * wholly contained in the other is the test, which is the same measure the
+ * extractor already uses to collapse "Pricing" and "Our Pricing".
+ */
+function samePage(a: string, b: string): boolean {
+  const left = a.trim().toLowerCase();
+  const right = b.trim().toLowerCase();
+  if (left === right) return true;
+
+  return coverage(left, right) === 1 || coverage(right, left) === 1;
+}
+
+/**
+ * Which of a set of links survive: one per page, the one that says the most.
+ *
+ * Grouped by address first and compared by title within the group, so two
+ * genuinely different pages that share a path - every Wikipedia article is
+ * /w/index.php?title=X - stay two links.
+ */
+export function survivorsOf(links: LinkEntry[]): Set<LinkEntry> {
+  const byPath = new Map<string, LinkEntry[]>();
+
+  for (const link of links) {
+    const key = pathKey(link.url);
+    const held = byPath.get(key);
+
+    const match = held?.find((kept) => samePage(kept.title, link.title));
+    if (!match) {
+      if (held) held.push(link);
+      else byPath.set(key, [link]);
+      continue;
+    }
+
+    // The survivor is the one that says the most: a note first, then the
+    // shortest URL, which is the one without the variant attached.
+    const better =
+      (!match.note && link.note) ||
+      (Boolean(match.note) === Boolean(link.note) && link.url.length < match.url.length);
+    if (better) held![held!.indexOf(match)] = link;
+  }
+
+  return new Set([...byPath.values()].flat());
+}
+
+/** The same, for a flat list - the Optional section is not a Section. */
+export function dedupeLinks(links: LinkEntry[]): LinkEntry[] {
+  const survivors = survivorsOf(links);
+  return links.filter((link) => survivors.has(link));
+}
+
+function dedupeVariants(sections: Section[]): Section[] {
+  // Across every section at once, not within each: a site links the same page
+  // from more than one part of its navigation.
+  const survivors = survivorsOf(sections.flatMap((section) => section.links));
+
+  return sections
+    .map((section) => ({ ...section, links: section.links.filter((link) => survivors.has(link)) }))
+    .filter((section) => section.links.length > 0);
+}
+
+export function curate(input: Section[]): Section[] {
+  const sections = dedupeVariants(input);
   const kept: Section[] = [];
   const orphans: LinkEntry[] = [];
 

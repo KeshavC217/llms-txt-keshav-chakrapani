@@ -67,7 +67,7 @@ const TABLE = "generations";
  * that no longer occurs and hid a real misconfiguration behind a partial row.
  */
 const SELECT_COLUMNS =
-  "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, change_count, check_interval_hours, sitemap_hash, source, published_at";
+  "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, check_interval_hours, sitemap_hash, source, published_at";
 
 const SUMMARY_COLUMNS = "url, generated_at, changed_at, source";
 
@@ -80,7 +80,6 @@ export interface StoredGeneration {
   structureHash?: string | null;
   lastCheckedAt?: string | null;
   changedAt?: string | null;
-  changeCount?: number;
   checkIntervalHours?: number;
   sitemapHash?: string | null;
   /** "generated" - we crawled and wrote it. "published" - the site's own file. */
@@ -130,7 +129,6 @@ function fromRow(row: any): StoredGeneration {
     structureHash: row.structure_hash,
     lastCheckedAt: row.last_checked_at,
     changedAt: row.changed_at,
-    changeCount: row.change_count ?? 0,
     checkIntervalHours: row.check_interval_hours ?? 24,
     sitemapHash: row.sitemap_hash,
     source: row.source ?? "generated",
@@ -199,7 +197,6 @@ export async function recordCheck(
     sitemapHash?: string;
     checkIntervalHours: number;
     changed: boolean;
-    changeCount: number;
     llmsTxt?: string;
   },
 ): Promise<boolean> {
@@ -214,7 +211,6 @@ export async function recordCheck(
       sitemap_hash: update.sitemapHash ?? null,
       check_interval_hours: update.checkIntervalHours,
       last_checked_at: now,
-      change_count: update.changeCount,
       ...(update.changed ? { changed_at: now } : {}),
       // Only replaced when the site moved: an unchanged site keeps the file it
       // already has, along with the date it was generated.

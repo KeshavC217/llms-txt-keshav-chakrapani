@@ -14,12 +14,12 @@
 
 import type { Extraction, LinkEntry, Section } from "./naiveExtractor.ts";
 import type { PageMeta } from "./pageMeta.ts";
-import { chooseDepth, curate, groupKeyFor, pathSegments, tidyLabel } from "./grouping.ts";
+import { chooseDepth, curate, dedupeLinks, groupKeyFor, pathSegments, tidyLabel } from "./grouping.ts";
 import { coverage, humanize } from "./nlp.ts";
 
 /** Pages that exist but are rarely what an agent came for. */
 const OPTIONAL_PATTERN =
-  /\b(privacy|terms|tos|legal|cookie|gdpr|imprint|impressum|disclaimer|accessibility|careers?|jobs|press|media-?kit|changelog|archive|sitemap|login|log-?in|signin|sign-?up|register|account|cart|checkout|rss|feed)\b/;
+  /\b(privacy|terms|tos|legal|cookie|gdpr|imprint|impressum|disclaimer|accessibility|careers?|jobs|press|media-?kit|changelog|archive|sitemap|login|log[- ]?in|signin|sign[- ]?up|register|account|cart|checkout|rss|feed)\b/;
 
 const MAX_NOTE_CHARS = 160;
 
@@ -140,8 +140,17 @@ export function buildFromCrawl(pages: PageMeta[], base: Extraction, homeUrl: str
     if (!entry || seen.has(entry.url)) continue;
     seen.add(entry.url);
 
-    const path = new URL(entry.url).pathname.toLowerCase();
-    if (OPTIONAL_PATTERN.test(path) || OPTIONAL_PATTERN.test(entry.title.toLowerCase())) {
+    /*
+     * The query counts as well as the path.
+     *
+     * Plenty of sites put the page's identity there rather than in the path:
+     * en.wikipedia.org addresses its sign-in as
+     * /w/index.php?title=Special:UserLogin, which reads as an ordinary page if
+     * only the path is examined.
+     */
+    const parsed = new URL(entry.url);
+    const address = `${parsed.pathname}${parsed.search}`.toLowerCase();
+    if (OPTIONAL_PATTERN.test(address) || OPTIONAL_PATTERN.test(entry.title.toLowerCase())) {
       optional.push(entry);
       continue;
     }
@@ -166,6 +175,9 @@ export function buildFromCrawl(pages: PageMeta[], base: Extraction, homeUrl: str
   return {
     ...base,
     sections: curate(sections),
-    optional: optional.slice(0, 25),
+    // Optional is a flat list rather than a Section, so it does not pass
+    // through curate and has to be deduplicated on its own - modal.com listed
+    // /signup twice here, once with ?next= attached.
+    optional: dedupeLinks(optional).slice(0, 25),
   };
 }

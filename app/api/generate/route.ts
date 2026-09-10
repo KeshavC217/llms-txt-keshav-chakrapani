@@ -180,7 +180,6 @@ export async function POST(request: Request) {
     crawl: generated.crawl,
     report,
     spec: { valid: issues.length === 0, issues },
-    markdownAlternate: extraction.markdownAlternate,
     existingLlmsTxt: extraction.existingLlmsTxt,
   });
 }
