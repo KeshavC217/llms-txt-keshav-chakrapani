@@ -477,9 +477,18 @@ of it. The schedule runs every five minutes - GitHub's shortest interval - offse
 because GitHub documents that scheduled events are delayed under load and that "high load times
 include the start of every hour".
 
-At that cadence a run can check forty sites, so four hundred stored sites are each looked at roughly
-every 45 minutes when checks are cheap. The number that binds first at real scale is rewrites: two a
-run is about 1,700 a day, and a site whose structure changes must wait its turn beyond that.
+The loop over the queue lives in the workflow rather than inside the function. A serverless function
+on this plan is killed at 60 seconds, so one call can only ever take a slice of the queue; the runner
+has six hours, and calls the endpoint until it reports nothing due. That removes the ceiling from the
+batch while each individual call stays comfortably inside it.
+
+The crawling itself stays on the deployment on purpose. That is where the code and the credentials
+already are, so nothing is duplicated into CI - and requests from a shared CI address are far more
+likely to be met with an anti-bot challenge than requests from the app's own host, which is a
+failure mode this project has already measured at length.
+
+What binds first at real scale is rewrites: two a run, because a rewrite takes about thirty seconds
+of a sixty-second ceiling.
 
 Three states record nothing at all, each for the same reason: a check that reached no verdict must
 not look like a quiet site.

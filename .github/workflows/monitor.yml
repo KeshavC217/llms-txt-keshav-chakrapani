@@ -31,23 +31,49 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
-      - name: Ask the deployment to re-check what is due
+      - name: Work through everything that is due
         env:
           APP_URL: ${{ secrets.APP_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
-          if [ -z "$APP_URL" ] || [ -z "$CRON_SECRET" ]; then
+          set -euo pipefail
+
+          if [ -z "${APP_URL:-}" ] || [ -z "${CRON_SECRET:-}" ]; then
             echo "APP_URL and CRON_SECRET must be set as repository secrets."
             exit 1
           fi
 
-          # --fail-with-body so a non-2xx ends the job loudly rather than
-          # leaving a silent failure to be noticed weeks later.
-          curl --fail-with-body --silent --show-error --max-time 120 \
-            -X POST "$APP_URL/api/refresh" \
-            -H "Authorization: Bearer $CRON_SECRET" \
-            -H "Content-Type: application/json" \
-            | tee response.json
+          # The loop lives here rather than inside the function.
+          #
+          # A serverless function on this plan is killed at 60 seconds, so one
+          # call can only ever handle a slice of the queue. This runner has six
+          # hours. Calling the endpoint until it reports nothing left to do
+          # removes the ceiling from the batch while leaving each individual
+          # call comfortably inside it.
+          #
+          # The crawling itself deliberately stays on the deployment: that is
+          # where the code and the credentials already are, and requests from a
+          # shared CI address are far more likely to be met with an anti-bot
+          # challenge than requests from the app's own host.
+          total=0
+          for pass in $(seq 1 20); do
+            response=$(curl --fail-with-body --silent --show-error --max-time 120 \
+              -X POST "$APP_URL/api/refresh" \
+              -H "Authorization: Bearer $CRON_SECRET" \
+              -H "Content-Type: application/json")
 
-          echo
-          echo "checked: $(python3 -c "import json;print(len(json.load(open('response.json'))['checked']))")"
+            checked=$(printf '%s' "$response" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['checked']))")
+            considered=$(printf '%s' "$response" | python3 -c "import json,sys; print(json.load(sys.stdin)['considered'])")
+            total=$((total + checked))
+
+            printf 'pass %s: %s checked, %s due\n' "$pass" "$checked" "$considered"
+            printf '%s' "$response" | python3 -m json.tool | head -40
+
+            # Nothing checked means nothing is due, which is the ordinary
+            # outcome and not worth another round trip.
+            if [ "$checked" -eq 0 ]; then
+              break
+            fi
+          done
+
+          echo "checked $total site(s) in total"
