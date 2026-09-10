@@ -109,17 +109,21 @@ export async function POST(request: Request) {
   let seed = extract(page.body, page.url);
 
   /*
-   * A shell has nothing to describe, so read it the way a browser would.
+   * Nothing to describe, so read it the way a browser would.
    *
-   * Only when the plain fetch found nothing: rendering costs seconds and a
-   * browser, and the great majority of sites need neither. `clientRendered`
-   * requires positive evidence - a script and an empty element for it to mount
-   * into - so a small complete page like example.com is not mistaken for one.
+   * The trigger is simply that the fetch found no links. It used to also
+   * require `clientRendered` - positive evidence of a shell - and that turned
+   * out to be too narrow against a live site: resy.com serves a different page
+   * to a datacentre address than to a laptop, and the variant Vercel receives
+   * does not look like a shell, so the render was skipped and the file came
+   * back empty.
    *
-   * The rendered page is adopted only if it actually found more, because a
-   * bigger page with nothing on it is not an improvement.
+   * Dropping the condition is safe because of the one below it: the rendered
+   * page is adopted only if it found MORE links than the plain fetch did. The
+   * cost of guessing wrong is a few seconds on a site that genuinely has no
+   * links, which is rare and which the crawl would find nothing on anyway.
    */
-  if (seed.clientRendered && linkCount(seed) === 0 && renderConfigured()) {
+  if (linkCount(seed) === 0 && renderConfigured()) {
     const rendered = await renderPage(page.url);
     if (rendered) {
       const fromBrowser = extract(rendered.html, rendered.url);
