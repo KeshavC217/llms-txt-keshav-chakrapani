@@ -63,3 +63,27 @@ create index if not exists generations_last_checked_at_idx
 -- Adding a policy here would expose the table to any visitor holding the
 -- publishable key, which is every visitor.
 alter table public.generations enable row level security;
+
+-- A row is a site we know about, and the state of its file.
+--
+-- Crawling moved off the request path, so a row now exists before its file
+-- does: POST /api/generate inserts one as 'queued' and returns, and the worker
+-- fills it in. The queue and the public catalogue are therefore the same list,
+-- which is what lets the catalogue show a site that is still being crawled
+-- rather than hiding it until it is finished.
+--
+-- 'queued'   nobody has picked it up yet
+-- 'crawling' a worker has claimed it; claimed_at is when
+-- 'ready'    llms_txt is the answer
+-- 'failed'   error says why, in the words the caller would have been given
+alter table public.generations
+  add column if not exists status     text not null default 'ready',
+  add column if not exists error      text,
+  add column if not exists claimed_at timestamptz;
+
+-- A queued row has no file yet. Existing rows are unaffected: they all have one.
+alter table public.generations alter column llms_txt drop not null;
+
+-- What the worker asks for on every pass.
+create index if not exists generations_status_idx
+  on public.generations (status, generated_at);

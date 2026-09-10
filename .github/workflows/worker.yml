@@ -1,0 +1,59 @@
+name: Worker
+
+# Where crawling happens.
+#
+# It used to happen inside the request that asked for it, which capped every
+# crawl at a Vercel function's sixty seconds. A runner has six hours, so the
+# work is simply done rather than budgeted, and the request that asked for it
+# returns immediately.
+#
+# This replaces monitor.yml, whose body was a bash loop calling /api/refresh up
+# to twenty times because one call could only manage a slice of the queue. That
+# endpoint no longer exists: the worker talks to the database directly.
+on:
+  # Someone asked for a site. POST /api/generate fires this, so a queued crawl
+  # starts within seconds rather than waiting for the next scheduled pass.
+  repository_dispatch:
+    types: [crawl]
+
+  # The safety net, and what runs the scheduled re-checks. Every five minutes is
+  # the shortest GitHub permits and is not what it delivers - a quiet repository
+  # sees far fewer - so nothing here may depend on the interval being kept. It
+  # is how quickly a stranded job gets picked up, not how often a site is
+  # checked; each row carries its own interval.
+  schedule:
+    - cron: "2-59/5 * * * *"
+
+  workflow_dispatch:
+
+# One worker at a time. Claims are optimistic and would survive an overlap, but
+# two runners crawling the same sites is wasted effort and doubled requests to
+# somebody else's server.
+concurrency:
+  group: worker
+  cancel-in-progress: false
+
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    # Well under the six hours available, and well over anything a normal pass
+    # needs: a run that approaches this has found something pathological.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Runs the TypeScript directly, as the test suite does.
+          node-version: 24
+          cache: npm
+
+      - run: npm i -g npm@11.19.1
+      - run: npm ci
+
+      - name: Build what is queued, then check what is due
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: npm run worker

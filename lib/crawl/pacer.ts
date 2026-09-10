@@ -12,8 +12,6 @@
  * throttled.
  */
 
-import type { Deadline } from "../deadline.ts";
-
 const DEFAULT_INTERVAL_MS = Number(process.env.CRAWL_MIN_REQUEST_INTERVAL_MS ?? 150);
 const MAX_INTERVAL_MS = Number(process.env.CRAWL_MAX_REQUEST_INTERVAL_MS ?? 2_000);
 
@@ -34,33 +32,14 @@ export class Pacer {
     return this.interval;
   }
 
-  /**
-   * Resolves when this worker's turn comes round. False means it never will,
-   * in the time the crawl has left, and the caller should stop.
-   *
-   * The queue is shared, so a worker's turn is not one interval away but as
-   * many as there are workers ahead of it. news.ycombinator.com asks for a
-   * ten-second crawl delay in its robots.txt, and with four workers the fourth
-   * waits forty seconds - which is why the wait itself has to be measured
-   * against the budget rather than the interval standing in for it. Before
-   * this, a crawl budgeted at twenty seconds took seventy.
-   *
-   * `reserveMs` is what the caller still needs after the wait, so a worker
-   * does not sleep up to the deadline and then have no time left to fetch.
-   *
-   * A refused turn does not consume a slot: the worker is stopping, and moving
-   * the queue on would make the next worker wait for a request never sent.
-   */
-  async wait(deadline?: Deadline, reserveMs = 0, now = () => Date.now()): Promise<boolean> {
+  /** Resolves when this worker's turn comes round. */
+  async wait(now = () => Date.now()): Promise<void> {
     const current = now();
     const slot = Math.max(current, this.nextSlot);
-    const delay = slot - current;
-
-    if (deadline && !deadline.allows(delay + reserveMs, current)) return false;
-
     this.nextSlot = slot + this.interval;
+
+    const delay = slot - current;
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
-    return true;
   }
 
   /** A refusal is unambiguous: back off hard. */

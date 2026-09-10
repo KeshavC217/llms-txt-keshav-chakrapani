@@ -3,9 +3,14 @@
 import Link from "next/link";
 import { useState } from "react";
 
+type Status = "queued" | "crawling" | "ready" | "failed";
+
 interface Result {
   url: string;
   llmsTxt: string;
+  status?: Status;
+  /** Why the crawl could not produce a file - a refusal, usually. */
+  error?: string | null;
   /** True when this came from storage rather than from a fresh run. */
   saved?: boolean;
   stored?: boolean;
@@ -25,6 +30,7 @@ export interface SavedSite {
   changedAt?: string | null;
   /** "published" means the site wrote it; "generated" means this project did. */
   source: string;
+  status?: Status;
 }
 
 /** "3h ago", so a stored file says how old it is. */
@@ -55,6 +61,33 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
   const [loading, setLoading] = useState(false);
 
   /**
+   * Waits for the worker to finish a site, by asking every couple of seconds.
+   *
+   * Polling rather than a realtime subscription: the endpoint that serves a
+   * saved file already returns everything this needs, so a subscription would
+   * be a second way to learn the same thing. A crawl takes tens of seconds, so
+   * the request count is trivial.
+   */
+  async function follow(target: string) {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      const response = await fetch(`/api/saved?url=${encodeURIComponent(target)}`);
+      if (!response.ok) continue;
+
+      const data: Result = await response.json();
+      setResult(data);
+
+      if (data.status === "ready") return;
+      if (data.status === "failed") {
+        setError(data.error ?? "That site could not be read.");
+        setResult(null);
+        return;
+      }
+    }
+  }
+
+  /**
    * `force` is a parameter rather than read from state: setting state and
    * reading it in the same handler sends the previous value, because React
    * does not apply the update until the next render.
@@ -75,7 +108,10 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
 
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Something went wrong.");
+
       setResult(data);
+      // A queued site is not an answer yet; the worker is building it.
+      if (data.status === "queued" || data.status === "crawling") await follow(data.url);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -157,6 +193,14 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
         <p className="mt-6 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
           {error}
         </p>
+      )}
+
+      {(result?.status === "queued" || result?.status === "crawling") && (
+        <div className="mt-6 rounded-lg bg-neutral-100 px-4 py-3 text-sm text-neutral-600 dark:bg-neutral-900 dark:text-neutral-400">
+          {result.status === "queued" ? "Queued." : "Crawling the site now."} This runs in the background and
+          takes a minute or two on a large site — the page will update itself, and the file will be in the
+          list below whether or not you wait.
+        </div>
       )}
 
       {result?.partial && (
@@ -244,8 +288,13 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
                   {site.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
                 </button>
                 <span className="shrink-0 text-neutral-500">
-                  {site.source === "published" ? "site's own" : "generated"} · {age(site.generatedAt)}
-                  {site.changedAt ? " · updated since" : ""}
+                  {site.status === "queued" || site.status === "crawling"
+                    ? site.status === "queued"
+                      ? "queued"
+                      : "crawling…"
+                    : site.status === "failed"
+                      ? "could not be read"
+                      : `${site.source === "published" ? "site's own" : "generated"} · ${age(site.generatedAt)}${site.changedAt ? " · updated since" : ""}`}
                 </span>
               </li>
             ))}

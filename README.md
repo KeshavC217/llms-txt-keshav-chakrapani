@@ -5,11 +5,11 @@
 A tool that generates an [`llms.txt`](https://llmstxt.org) file for a website, and keeps it up to
 date as the site changes.
 
-You enter a URL. If the site publishes its own `llms.txt`, that is the answer and it costs one
-request. Otherwise the server crawls the site — sitemap and links, paced by what the site tolerates,
+You enter a URL and the site is queued. A worker picks it up within seconds: if the site publishes
+its own `llms.txt`, that is the answer and it costs one request. Otherwise it crawls the site — sitemap and links, paced by what the site tolerates,
 obeying `robots.txt` — extracts what each page says about itself, groups the result into sections,
-runs two model passes over it, and stores what it produced. A scheduled job re-checks stored sites
-and rewrites the ones that have moved.
+runs two model passes over it, and stores what it produced. The same worker re-checks stored sites
+on a schedule and rewrites the ones that have moved, so there is one place a crawl happens.
 
 ## Setup
 
@@ -40,12 +40,13 @@ db/schema.sql            the one table, and the two migrations that grew it
 app/
   page.tsx               the saved list, server-rendered; Generator.tsx is the client half
   login/                 email + password sign-in
-  api/generate/route.ts  POST { url } -> published? -> crawl -> models -> store
-  api/saved/route.ts     GET the saved list, or one file. No account needed.
-  api/refresh/route.ts   POST, cron-authenticated: re-check what is due
+  api/generate/route.ts  POST { url } -> queue it, wake the worker, return
+  api/saved/route.ts     GET the catalogue, or one file. No account needed.
 proxy.ts                 refreshes the Supabase session (Next 16's middleware)
+scripts/
+  worker.ts              the one place a crawl happens: queued sites, then due ones
 lib/
-  deadline.ts            one clock for the request, so the steps cannot outlast it
+  dispatch.ts            waking the worker when someone asks for a site
   fetchPage.ts           one page, with the SSRF guard and the block detector
   blocks.ts              telling a challenge page from a real one
   published.ts           finding and recognising a site's own llms.txt
@@ -71,22 +72,16 @@ tests/
   *.test.ts              node:test suites, run with `npm test`
 ```
 
-`POST /api/generate` takes `{ "url": "example.com", "regenerate": false }` and returns:
+`POST /api/generate` takes `{ "url": "example.com", "regenerate": false }`. If the site already has
+a file, that comes straight back. Otherwise the site is queued and the answer is:
 
 ```json
-{
-  "url": "https://example.com/",
-  "llmsTxt": "# Example\n\n> ...\n\n## Docs\n\n- [Quickstart](...): ...\n",
-  "crawl": { "pages": 50, "planned": 49, "failed": 0, "partial": false },
-  "report": { "notesAccepted": 44, "sectionsRenamed": 3, "chunksFailed": 0 },
-  "spec": { "valid": true, "issues": [] },
-  "stored": true
-}
+{ "url": "https://example.com/", "status": "queued", "dispatched": true }
 ```
 
-Three other shapes come back from the same endpoint: a stored file (`saved: true`, with
-`generatedAt`), a site's own file (`source: "published"`, with `publishedAt`), and a refusal
-(`blocked`, with the kind of block). `regenerate: true` skips both short circuits and crawls.
+`GET /api/saved?url=…` is then polled until `status` is `ready` or `failed`. `dispatched` says
+whether the worker was woken directly; if it is false the next scheduled pass collects the row, so
+the crawl still happens.
 
 `TEMPLATE.txt` defines what is being aimed at, generalized from the spec at
 [llmstxt.org](https://llmstxt.org) and from 22 files sampled off
@@ -343,70 +338,66 @@ are.
 getlago doc claims to be "Developer documentation for Lago's API-first billing platform". A
 description repeated across a fifth of the crawl is dropped, and the home page's specific note kept.
 
-## One clock for the request
+## Crawling happens in the background
 
-Every step had its own timeout and nothing bounded their sum. Each number was defensible alone -
-10s to fetch the page, 5s to look for a published file, 4s for `robots.txt`, 8s for a sitemap, 25s
-of crawling, 35s of models - and together they were roughly twice the sixty seconds a Vercel
-function is allowed.
+Crawling used to run inside the request that asked for it, which meant every step had to finish
+inside a Vercel function's sixty seconds. That one constraint produced a request-wide clock threaded
+through seven files, partial-crawl semantics, a regeneration budget in the monitoring endpoint, and
+a bash loop that called that endpoint twenty times because one call could only manage a slice of the
+queue. None of it was design; all of it was compensation.
 
-So on a slow site the platform killed the process partway through, which is the worst of the
-outcomes available:
+Now `POST /api/generate` writes a row and returns. `scripts/worker.ts` runs in a GitHub Actions job
+- six hours where a function has sixty seconds - and does the work with nothing waiting on it.
 
-- the caller gets Vercel's own timeout page rather than JSON, so the interface can only say
-  *"something went wrong"*;
-- nothing is stored, because the write is the last line of a handler that was never reached;
-- and since nothing is stored, the next attempt starts from the beginning and dies in the same
-  place. **A site slow enough to trip this could never acquire a file at all**, however many times
-  anyone asked.
+**A row is a site we know about, and the state of its file**: `queued`, `crawling`, `ready` or
+`failed`. There is no separate jobs table, which is deliberate: the queue and the public catalogue
+are the same list, so a site being crawled is visible rather than hidden until it finishes, and a
+site that refuses to be read says so instead of disappearing.
 
-That last one is why it is a bug rather than a slow path.
+**Claiming is optimistic.** `update … set status='crawling' where url=$1 and status='queued'`, and
+whoever gets a row back has it. Two workers racing produce one winner and one empty result, and the
+loser asks for the next one. A stored procedure with `for update skip locked` would have been a
+second place for this logic to live and a migration to keep in step with it.
 
-`lib/deadline.ts` is one clock, started when the request arrives and passed down. Every network step
-takes the shorter of its own cap and what is left, and the handler returns what it has when the
-clock runs out.
+**A run that dies mid-crawl does not strand a site.** `releaseStaleClaims` returns anything claimed
+and unfinished for half an hour to the queue.
 
-### What actually took seventy seconds
+### What woke it
 
-The obvious culprit was the crawl asking the wrong question. It checked *has the budget elapsed*
-before starting a page, so a worker that passed with a tenth of a second to spare still had a full
-page timeout ahead of it. It now asks whether a page can still be started at all, and the page's own
-abort signal is the shorter of its cap and the remainder - so a page begun late is aborted exactly
-on the deadline rather than past it.
+The schedule alone was not enough. GitHub delays scheduled events under load and a quiet repository
+sees far fewer runs than it asks for - this one was seeing roughly one every four hours against a
+cron of every five minutes. Nobody should wait that long for a URL they just typed, so asking for a
+site sends a `repository_dispatch` and the run starts within seconds.
 
-That was not the big one. `news.ycombinator.com` asks for a **ten-second crawl delay** in its
-robots.txt, which is honoured; the pacer's queue is shared, so with four workers the fourth worker's
-turn is forty seconds away - and `pacer.wait()` slept for all of it without consulting any budget.
-The retry after a failed page did it a second time. A crawl budgeted at twenty seconds took seventy.
+The dispatch is an optimisation, not the mechanism: every queued row is collected by the next
+scheduled pass whether or not it worked, so a missing token or a GitHub outage makes the app slower
+and not broken. The response says which happened.
 
-`Pacer.wait()` now takes the deadline and returns false when the turn would arrive too late, so the
-worker stops instead of sleeping. A refused turn does not consume a slot, or the next worker would
-wait for a request that is never sent.
+### Crawling from a runner, which was supposed to be worse
 
-| site | before | after |
+Moving the worker into CI contradicted a note in the old workflow: that requests from a shared CI
+address are "far more likely to be met with an anti-bot challenge" than requests from the app's own
+host. It was the load-bearing assumption behind the previous design and it had never been measured.
+
+Measured, over ten sites, from a runner and from a laptop:
+
+| | readable | refused |
 |---|---|---|
-| `news.ycombinator.com` | 71.2s, killed, no file | 28.4s, 4 pages, 23 notes |
-| `airbnb.com` | 27.9s | 37.9s, 47 of 49 pages |
-| `nytimes.com` | 60.9s at the ceiling | 38.0s, 32 pages |
-| `en.wikipedia.org` | 21s | 21.2s, complete |
+| laptop | 7/10 | `openai.com`, `medium.com`, `g2.com` |
+| GitHub runner | 7/10 | `openai.com`, `medium.com`, `g2.com` |
 
-Hacker News gets four pages because it asked to be crawled once every ten seconds and that is what
-fifty seconds buys. Four pages with real notes is a file; a timeout is not.
+Identical, down to the response sizes. The three refusals are the ones that refuse everybody. The
+assumption was false, and the design that rested on it went.
 
-### A partial file is stored, without a fingerprint
+### What went with it
 
-Refusing to store one was tried and undone: it recreates the dead zone the deadline exists to
-remove, since a site that always runs out of time would always be partial and so would never
-acquire a file. It also puts back the "was the crawl complete" condition that was deliberately
-removed when saving stopped having conditions.
+`lib/deadline.ts` and its threading through seven files; `partial` as a routine outcome rather than
+a rare one; `RunBudget` and the regeneration budget; `POST /api/refresh` entirely, along with
+`CRON_SECRET` and its constant-time comparison; and the twenty-pass bash loop.
 
-What must not be stored is the **structure hash**. Which pages a truncated crawl holds depends on
-how fast the site was that day, so a fingerprint taken from one would report a change on every
-subsequent check and the site would be rewritten forever. A null hash already means "no baseline" to
-the monitor, which takes a fresh one from its own complete crawl later.
-
-The response carries `partial: true` and the interface says so, with the page counts and a way to
-try again.
+`CRAWL_TIME_BUDGET_MS` survives as what it was originally called - a safety valve - and is now ten
+minutes rather than twenty-five seconds. A crawl that trips it has found a site behaving
+pathologically, which is what `partial` should have meant all along.
 
 ## The AI sieve
 
@@ -594,22 +585,13 @@ weekly. A row that has never been fingerprinted records its first one as a *base
 change — otherwise every pre-existing row would halve its interval on the first pass and be watched
 twice as closely for having been there longest.
 
-**The loop lives in GitHub Actions, the crawling lives on Vercel.** `.github/workflows/monitor.yml`
-calls `POST /api/refresh` until it reports nothing left due. A serverless function on this plan is
-killed at 60 seconds, so one call can only handle a slice of the queue; the runner has six hours.
-The crawling deliberately stays on the deployment - that is where the credentials already are, and
-requests from a shared CI address are far more likely to meet an anti-bot challenge than requests
-from the app's own host.
+**The worker does this too**, after it has emptied the queue, so a site someone is waiting for is
+never stuck behind a scheduled re-check of a site nobody is looking at. There is one place a crawl
+happens.
 
-To set it up, add two repository secrets:
-
-```
-APP_URL       https://your-deployment.vercel.app
-CRON_SECRET   the same value as the deployment's CRON_SECRET (openssl rand -hex 32)
-```
-
-`/api/refresh` compares the bearer token in constant time and answers 401 without one. Run it by
-hand from the Actions tab (`workflow_dispatch`) rather than waiting for the schedule.
+To set it up, add `SUPABASE_URL`, `SUPABASE_SECRET_KEY` and `OPENROUTER_API_KEY` as **repository**
+secrets, and `GITHUB_DISPATCH_TOKEN` plus `GITHUB_REPOSITORY` to the deployment so it can wake the
+worker.
 
 **The schedule is a ceiling, not a promise.** The cron reads `2-59/5` - every five minutes, offset
 off the hour because GitHub documents that scheduled events are delayed under load and that "high
@@ -617,13 +599,6 @@ load times include the start of every hour". In practice a low-activity reposito
 this one has been running roughly every four hours. GitHub also disables schedules on repositories
 with no activity for 60 days, without saying so. Anything that has to be reliable belongs on a real
 scheduler; this is the free one.
-
-**A run is bounded by expense, not by a count of sites.** `MONITOR_CHECKS_PER_RUN` (40) and
-`MONITOR_REGENERATIONS_PER_RUN` (2) are separate because the two cost two orders of magnitude apart,
-and a run declines to *begin* a regeneration it has not the time to finish - the first live run took
-69 seconds and would have been killed mid-write. A regeneration that gets deferred deliberately does
-not record the new sitemap fingerprint: recording it would make the next run's cheap tier say
-"unchanged" and the change would be lost.
 
 **A partial crawl is never recorded.** One cut short by its safety valve depends on how fast the
 network was, and comparing against it would report a change every run.
@@ -649,7 +624,7 @@ wrong and there is no account for them to sign in to.
 ## Tests
 
 ```bash
-npm test          # 171 tests, node --test, no framework and no dependencies
+npm test          # 164 tests, node --test, no framework and no dependencies
 npm run lint
 npm run typecheck
 ```
@@ -673,9 +648,9 @@ a specific bug found against live sites, so a regression has somewhere to fail l
 and stubs the two things a unit test must not reach - the network and the store - so what is
 asserted is the handler's own decisions: the gate refusing a signed-out caller *before* the fetch
 (a stub that throws on any request is what proves the order), a stored file served without
-crawling, `regenerate` skipping it, a site's own llms.txt saved as theirs rather than as ours, and
-`/api/refresh` answering 401 to a token of the wrong length rather than letting `timingSafeEqual`
-throw.
+crawling, `regenerate` skipping it, a site's own llms.txt saved as theirs rather than as ours, and asking
+for a site never touching the site at all — the request queues a row and returns, and a stub that
+throws on any network call is what proves it.
 
 Two things had to give way for that. `lib/monitor.ts` gained `RunBudget`, which was arithmetic
 closed over two mutable counters inside the refresh loop - the one part of monitoring most worth
@@ -704,7 +679,7 @@ The short version:
 | `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | accounts; without them generating answers 503 |
 | `SUPABASE_SECRET_KEY` | the store, and therefore monitoring. Server only, never `NEXT_PUBLIC_` |
 | `OPENROUTER_API_KEY` | the summary, the section names and the per-link notes |
-| `CRON_SECRET` | `POST /api/refresh`; without it the endpoint refuses everything |
+| `GITHUB_DISPATCH_TOKEN`, `GITHUB_REPOSITORY` | waking the worker on demand; without them the schedule collects the row |
 | `ALLOW_PRIVATE_CRAWL_TARGETS` | testing against a local server, past the SSRF guard |
 
 The crawl and monitor tunables (`CRAWL_MAX_PAGES`, `MONITOR_*`) have working defaults and are

@@ -11,7 +11,6 @@
  * on its docs domain.
  */
 
-import { Deadline } from "./deadline.ts";
 import { validateLlmsTxt } from "./spec.ts";
 
 /** Their llms.txt is a text file, and there are up to two candidates to try. */
@@ -64,22 +63,12 @@ export function publishedCandidates(pageUrl: string, declared?: string): string[
  * failure of a site answering 200 with an HTML 404 page. Whether it conforms is
  * reported to the caller rather than used to hide it.
  */
-export async function findPublished(
-  pageUrl: string,
-  userAgent: string,
-  declared?: string,
-  deadline?: Deadline,
-): Promise<PublishedFile | null> {
+export async function findPublished(pageUrl: string, userAgent: string, declared?: string): Promise<PublishedFile | null> {
   for (const candidate of publishedCandidates(pageUrl, declared)) {
-    // Their file is a shortcut, not a requirement. With no time left to try
-    // the second candidate, going on to the crawl beats spending the crawl's
-    // remaining seconds looking for a file that is probably not there.
-    if (deadline && !deadline.allows(FETCH_TIMEOUT_MS)) break;
-
     try {
       const response = await fetch(candidate, {
         headers: { "User-Agent": userAgent, Accept: "text/plain,text/markdown,*/*" },
-        signal: deadline ? deadline.signal(FETCH_TIMEOUT_MS) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
 
       if (!response.ok) continue;

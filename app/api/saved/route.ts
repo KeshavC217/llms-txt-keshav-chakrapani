@@ -26,6 +26,8 @@ export async function GET(request: Request) {
     return NextResponse.json({
       url: saved.url,
       llmsTxt: saved.llmsTxt,
+      status: saved.status,
+      error: saved.error,
       generatedAt: saved.generatedAt,
       changedAt: saved.changedAt,
       source: saved.source,

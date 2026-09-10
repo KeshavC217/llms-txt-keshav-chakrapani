@@ -9,7 +9,6 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
 import { type Block, detectBlock } from "./blocks.ts";
-import { Deadline } from "./deadline.ts";
 
 export interface FetchedPage {
   url: string;
@@ -116,18 +115,17 @@ async function assertPublicUrl(url: string): Promise<void> {
  * A refusal is not an exception: a challenge page is a perfectly good HTTP
  * response, and the caller needs to know which of the two it received.
  */
-export async function fetchPage(url: string, deadline?: Deadline): Promise<FetchedPage> {
+export async function fetchPage(url: string): Promise<FetchedPage> {
   await assertPublicUrl(url);
 
-  return request(url, USER_AGENT, deadline);
+  return request(url, USER_AGENT);
 }
 
-async function request(url: string, userAgent: string, deadline?: Deadline): Promise<FetchedPage> {
+async function request(url: string, userAgent: string): Promise<FetchedPage> {
   const response = await fetch(url, {
     headers: { "User-Agent": userAgent, ...COMMON_HEADERS },
     redirect: "follow",
-    // Its own cap, or what is left of the request, whichever comes first.
-    signal: deadline ? deadline.signal(FETCH_TIMEOUT_MS) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
 
   // A public URL can redirect into the private range, so the address we

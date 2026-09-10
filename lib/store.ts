@@ -67,13 +67,25 @@ const TABLE = "generations";
  * that no longer occurs and hid a real misconfiguration behind a partial row.
  */
 const SELECT_COLUMNS =
-  "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, change_count, check_interval_hours, sitemap_hash, source, published_at";
+  "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, change_count, check_interval_hours, sitemap_hash, source, published_at, status, error, claimed_at";
 
-const SUMMARY_COLUMNS = "url, generated_at, changed_at, source";
+const SUMMARY_COLUMNS = "url, generated_at, changed_at, source, status";
+
+/**
+ * Where a site is between being asked for and having a file.
+ *
+ * The queue and the catalogue are one list, so this is the only thing that
+ * separates a site being crawled from one that is done.
+ */
+export type Status = "queued" | "crawling" | "ready" | "failed";
 
 export interface StoredGeneration {
   url: string;
+  /** Empty until the worker has written one; see `status`. */
   llmsTxt: string;
+  status: Status;
+  /** Why it failed, in the words the caller would have been given. */
+  error?: string | null;
   contentHash: string;
   generatedAt: string;
   /** Fingerprint of the site itself, model-free; see lib/monitor.ts. */
@@ -124,7 +136,9 @@ export async function readGeneration(url: string): Promise<StoredGeneration | nu
 function fromRow(row: any): StoredGeneration {
   return {
     url: row.url,
-    llmsTxt: row.llms_txt,
+    llmsTxt: row.llms_txt ?? "",
+    status: (row.status ?? "ready") as Status,
+    error: row.error,
     contentHash: row.content_hash,
     generatedAt: row.generated_at,
     structureHash: row.structure_hash,
@@ -145,6 +159,7 @@ export interface SavedSummary {
   generatedAt: string;
   changedAt?: string | null;
   source: string;
+  status: Status;
 }
 
 export async function listGenerations(limit = 100): Promise<SavedSummary[]> {
@@ -167,6 +182,7 @@ export async function listGenerations(limit = 100): Promise<SavedSummary[]> {
         generatedAt: row.generated_at,
         changedAt: row.changed_at ?? null,
         source: row.source ?? "generated",
+        status: (row.status ?? "ready") as Status,
       }));
   /* eslint-enable @typescript-eslint/no-explicit-any */
 }
@@ -255,4 +271,142 @@ export async function writeGeneration(url: string, llmsTxt: string, options: Wri
   });
 
   return !error;
+}
+
+/*
+ * The queue, which is the same table as the catalogue.
+ *
+ * A separate jobs table was the obvious shape and the wrong one: it would mean
+ * two lists to keep in step, and a site being crawled would be invisible to the
+ * catalogue until it finished. One row per site, carrying its own state, is
+ * fewer moving parts and a better product - the catalogue can say "crawling".
+ */
+
+/**
+ * Asks for a site. Returns whether a crawl was actually queued.
+ *
+ * An upsert rather than an insert, because asking twice for the same site is
+ * ordinary - two people, or one person impatient. A row already queued or
+ * crawling is left exactly as it is, so a second ask joins the first rather
+ * than restarting it or creating a duplicate.
+ */
+export async function enqueue(url: string): Promise<boolean> {
+  const supabase = client();
+  if (!supabase) return false;
+
+  const existing = await readGeneration(url);
+  if (existing && (existing.status === "queued" || existing.status === "crawling")) return true;
+
+  const { error } = await supabase.from(TABLE).upsert({
+    url,
+    status: "queued",
+    error: null,
+    claimed_at: null,
+    // Kept if the row already had one: a site being regenerated should go on
+    // showing its previous file until the new one replaces it.
+    ...(existing ? {} : { llms_txt: null, content_hash: "", generated_at: new Date().toISOString() }),
+  });
+
+  return !error;
+}
+
+/**
+ * Takes one queued site, or null when there is nothing to do.
+ *
+ * The claim is optimistic rather than `for update skip locked`: the update is
+ * conditional on the row still being queued, so two workers racing for the same
+ * site produce one winner and one empty result, and the loser simply asks
+ * again. That needs no stored procedure, which would have been a second place
+ * where this logic lived and a migration to keep in step with it.
+ */
+export async function claimNext(): Promise<StoredGeneration | null> {
+  const supabase = client();
+  if (!supabase) return null;
+
+  const { data: queued } = await supabase
+    .from(TABLE)
+    .select("url")
+    .eq("status", "queued")
+    .order("generated_at", { ascending: true })
+    .limit(5);
+
+  for (const candidate of queued ?? []) {
+    const { data } = await supabase
+      .from(TABLE)
+      .update({ status: "crawling", claimed_at: new Date().toISOString() })
+      .eq("url", candidate.url)
+      .eq("status", "queued")
+      .select(SELECT_COLUMNS)
+      .maybeSingle();
+
+    if (data) return fromRow(data);
+  }
+
+  return null;
+}
+
+/** The crawl produced a file. */
+export async function completeGeneration(
+  url: string,
+  llmsTxt: string,
+  options: WriteOptions = {},
+): Promise<boolean> {
+  const supabase = client();
+  if (!supabase) return false;
+
+  const { error } = await supabase
+    .from(TABLE)
+    .update({
+      llms_txt: llmsTxt,
+      content_hash: hashContent(llmsTxt),
+      generated_at: new Date().toISOString(),
+      structure_hash: options.structureHash ?? null,
+      source: options.source ?? "generated",
+      published_at: options.publishedAt ?? null,
+      status: "ready",
+      error: null,
+      claimed_at: null,
+    })
+    .eq("url", url);
+
+  return !error;
+}
+
+/**
+ * The crawl could not produce one, and the reason is worth keeping.
+ *
+ * A site that refuses us says so in the catalogue rather than disappearing from
+ * it, which is the difference between a tool that looks broken and one that
+ * tells you what happened.
+ */
+export async function failGeneration(url: string, reason: string): Promise<boolean> {
+  const supabase = client();
+  if (!supabase) return false;
+
+  const { error } = await supabase
+    .from(TABLE)
+    .update({ status: "failed", error: reason.slice(0, 500), claimed_at: null })
+    .eq("url", url);
+
+  return !error;
+}
+
+/**
+ * Frees rows a worker claimed and never finished - it was cancelled, or the
+ * runner was killed mid-crawl. Without this a crashed run would strand a site
+ * in "crawling" forever, and nothing would ever pick it up again.
+ */
+export async function releaseStaleClaims(olderThanMs = 30 * 60_000): Promise<number> {
+  const supabase = client();
+  if (!supabase) return 0;
+
+  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+  const { data } = await supabase
+    .from(TABLE)
+    .update({ status: "queued", claimed_at: null })
+    .eq("status", "crawling")
+    .lt("claimed_at", cutoff)
+    .select("url");
+
+  return data?.length ?? 0;
 }

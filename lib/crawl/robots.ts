@@ -1,5 +1,3 @@
-import { Deadline } from "../deadline.ts";
-
 /**
  * robots.txt: what a site has said about being crawled.
  *
@@ -131,11 +129,11 @@ function matches(pattern: string, pathname: string): boolean {
  * a 404 is the documented "crawl freely", and a site that errors has not told
  * us to stay out.
  */
-export async function fetchRobots(origin: string, userAgent: string, deadline?: Deadline): Promise<Robots> {
+export async function fetchRobots(origin: string, userAgent: string): Promise<Robots> {
   try {
     const response = await fetch(new URL("/robots.txt", origin), {
       headers: { "User-Agent": userAgent, Accept: "text/plain,*/*" },
-      signal: deadline ? deadline.signal(FETCH_TIMEOUT_MS) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
 
     if (!response.ok) return ALLOW_ALL;

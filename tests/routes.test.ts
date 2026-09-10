@@ -35,7 +35,7 @@ const lib = (name: string) => new URL(`../lib/${name}.ts`, import.meta.url).href
 let currentUser: { id: string } | null = null;
 let savedRow: Record<string, unknown> | null = null;
 let savedList: Record<string, unknown>[] = [];
-let writes: { url: string; llmsTxt: string; options: Record<string, unknown> }[] = [];
+let queued: string[] = [];
 
 mock.module(lib("supabase/server"), {
   namedExports: {
@@ -56,16 +56,25 @@ mock.module(lib("store"), {
     listGenerations: async () => savedList,
     generationsToCheck: async () => [],
     recordCheck: async () => true,
-    writeGeneration: async (url: string, llmsTxt: string, options = {}) => {
-      writes.push({ url, llmsTxt, options });
+    enqueue: async (url: string) => {
+      queued.push(url);
       return true;
     },
   },
 });
 
+// The dispatch is an optimisation - a queued row is collected by the schedule
+// either way - so it must never decide whether the request succeeds.
+let dispatchWorks = true;
+mock.module(lib("dispatch"), {
+  namedExports: {
+    dispatchConfigured: () => dispatchWorks,
+    requestCrawl: async () => dispatchWorks,
+  },
+});
+
 const { POST: generate } = await import("../app/api/generate/route.ts");
 const { GET: saved } = await import("../app/api/saved/route.ts");
-const { POST: refresh } = await import("../app/api/refresh/route.ts");
 
 const post = (url: string, body: unknown) =>
   new Request(`http://test/api${url}`, {
@@ -83,29 +92,12 @@ function forbidNetwork() {
   }) as typeof fetch;
 }
 
-/** Serves a fixed set of paths and 404s everything else. */
-function serve(routes: Record<string, { body: string; type?: string }>) {
-  const seen: string[] = [];
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    seen.push(url);
-
-    const match = routes[new URL(url).pathname];
-    if (!match) return new Response("no", { status: 404 });
-
-    return new Response(match.body, {
-      status: 200,
-      headers: { "content-type": match.type ?? "text/html; charset=utf-8" },
-    });
-  }) as typeof fetch;
-  return seen;
-}
-
 beforeEach(() => {
   currentUser = null;
   savedRow = null;
   savedList = [];
-  writes = [];
+  queued = [];
+  dispatchWorks = true;
   process.env.SUPABASE_SECRET_KEY = "sb_secret_stub";
   forbidNetwork();
 });
@@ -148,6 +140,7 @@ test("generate serves a stored file without crawling", async () => {
     llmsTxt: "# Example\n\n> A stored file\n",
     generatedAt: "2026-09-09T00:00:00.000Z",
     source: "generated",
+    status: "ready",
   };
 
   const response = await generate(post("/generate", { url: "example.com" }));
@@ -157,42 +150,64 @@ test("generate serves a stored file without crawling", async () => {
   assert.equal(body.saved, true, "the interface has to be able to say this was not fresh");
   assert.equal(body.generatedAt, "2026-09-09T00:00:00.000Z");
   assert.match(body.llmsTxt, /A stored file/);
+  assert.equal(queued.length, 0, "a file that already exists must not be rebuilt");
 });
 
-test("regenerate skips the stored file and goes to the site", async () => {
-  // The bug this covers shipped once: 'Generate one anyway' returned the saved
+test("regenerate skips the stored file and queues a fresh crawl", async () => {
+  // The bug this covers shipped once: "Generate one anyway" returned the saved
   // copy, so the button did nothing and looked like it had worked.
   currentUser = { id: "u1" };
-  savedRow = { url: "https://example.com/", llmsTxt: "# Stale\n", generatedAt: "2026-09-09T00:00:00.000Z" };
+  savedRow = {
+    url: "https://example.com/",
+    llmsTxt: "# Stale\n",
+    generatedAt: "2026-09-09T00:00:00.000Z",
+    status: "ready",
+  };
 
-  const seen = serve({});
-  const response = await generate(post("/generate", { url: "example.com", regenerate: true }));
+  const body = await (await generate(post("/generate", { url: "example.com", regenerate: true }))).json();
 
-  assert.notEqual(response.status, 200, "the stored file must not be served");
-  assert.ok(seen.length > 0, "regenerate has to reach the network");
+  assert.equal(body.status, "queued");
+  assert.deepEqual(queued, ["https://example.com/"]);
 });
 
-test("a site's own llms.txt is served and saved as theirs", async () => {
+test("a site still being crawled is queued rather than served empty", async () => {
+  // A row exists before its file does. Serving it as though it were an answer
+  // would hand back an empty llms.txt and call it finished.
   currentUser = { id: "u1" };
-  const published = "# Lago\n\n> A billing platform\n\n## Docs\n\n- [Guide](https://example.com/docs)\n";
-  serve({
-    "/": { body: "<html><head><title>Example</title></head><body><a href='/docs'>Docs</a></body></html>" },
-    "/llms.txt": { body: published, type: "text/plain" },
-  });
+  savedRow = { url: "https://example.com/", llmsTxt: "", generatedAt: "2026-09-09T00:00:00.000Z", status: "crawling" };
+
+  const body = await (await generate(post("/generate", { url: "example.com" }))).json();
+  assert.equal(body.status, "queued");
+});
+
+test("a failed dispatch does not fail the request", async () => {
+  // The schedule collects the row either way, so a GitHub outage must not stop
+  // someone asking for a site.
+  currentUser = { id: "u1" };
+  dispatchWorks = false;
 
   const response = await generate(post("/generate", { url: "example.com" }));
   const body = await response.json();
 
   assert.equal(response.status, 200);
-  assert.equal(body.source, "published");
-  assert.equal(body.publishedAt, "https://example.com/llms.txt");
-  assert.equal(body.llmsTxt, published, "their file is served verbatim, not rewritten");
+  assert.equal(body.status, "queued");
+  assert.equal(body.dispatched, false, "but it says so, so a silent queue is visible");
+  assert.deepEqual(queued, ["https://example.com/"]);
+});
 
-  // Saved, but labelled - so the list can say which files this project wrote,
-  // and so the scheduled check re-reads theirs instead of crawling.
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].options.source, "published");
-  assert.equal(writes[0].options.publishedAt, "https://example.com/llms.txt");
+test("asking for a site never touches the site", async () => {
+  // The whole point of the change: the request writes a row and returns. The
+  // fetching, the crawl and the models happen in scripts/worker.ts, where
+  // nothing is waiting on them. forbidNetwork is what proves it - any request
+  // at all throws.
+  currentUser = { id: "u1" };
+
+  const response = await generate(post("/generate", { url: "example.com" }));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.status, "queued");
+  assert.deepEqual(queued, ["https://example.com/"]);
 });
 
 /* --- GET /api/saved ----------------------------------------------------- */
@@ -239,37 +254,3 @@ test("saved rejects a URL it cannot use", async () => {
   assert.equal(response.status, 400);
 });
 
-/* --- POST /api/refresh -------------------------------------------------- */
-
-const withToken = (token: string) =>
-  new Request("http://test/api/refresh", { method: "POST", headers: { authorization: `Bearer ${token}` } });
-
-test("refresh refuses everything without the right secret", async () => {
-  assert.equal((await refresh(new Request("http://test/api/refresh", { method: "POST" }))).status, 401);
-
-  // Same length as the real secret, so the comparison runs rather than being
-  // short-circuited by the length check.
-  const wrong = "x".repeat(process.env.CRON_SECRET!.length);
-  assert.equal((await refresh(withToken(wrong))).status, 401);
-
-  // Different lengths: timingSafeEqual throws on these, and the throw would
-  // itself leak the length, so the guard has to answer 401 rather than 500.
-  assert.equal((await refresh(withToken("short"))).status, 401);
-  assert.equal((await refresh(withToken("x".repeat(200)))).status, 401);
-});
-
-test("refresh answers 503 when there is no store to monitor", async () => {
-  delete process.env.SUPABASE_SECRET_KEY;
-
-  const response = await refresh(withToken(process.env.CRON_SECRET!));
-  assert.equal(response.status, 503);
-});
-
-test("refresh with nothing due does nothing and says so", async () => {
-  const response = await refresh(withToken(process.env.CRON_SECRET!));
-  const body = await response.json();
-
-  assert.equal(response.status, 200);
-  assert.deepEqual(body.checked, []);
-  assert.equal(body.considered, 0);
-});
