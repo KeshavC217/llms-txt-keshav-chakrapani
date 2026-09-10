@@ -9,6 +9,7 @@ import { readPage } from "../lib/pageMeta.ts";
 import { findPublished, publishedCandidates } from "../lib/published.ts";
 import { planCrawl } from "../lib/crawl/plan.ts";
 import { crawl } from "../lib/crawl/crawl.ts";
+import { Deadline } from "../lib/deadline.ts";
 import { createServer } from "node:http";
 
 const AGENT = "llms-txt-generator";
@@ -321,4 +322,138 @@ test("prefix filters keep a crawl inside a section", async () => {
   } finally {
     server.close();
   }
+});
+
+test("a slow site ends the crawl on the deadline rather than the function's limit", async () => {
+  // The failure this exists to stop: news.ycombinator.com took 61 seconds and
+  // had not started the model passes, so Vercel killed the request. Nothing
+  // was returned, nothing stored, and the next attempt failed identically.
+  const page = (title: string, links: string[] = []) =>
+    `<html><head><title>${title}</title></head><body>${links
+      .map((href) => `<a href="${href}">${href}</a>`)
+      .join("")}</body></html>`;
+
+  const links = Array.from({ length: 40 }, (_, i) => `/slow/${i}`);
+  const pages: Record<string, string> = { "/": page("Home", links), "/robots.txt": "" };
+  for (const href of links) pages[href] = page(`Page ${href}`);
+
+  // 200ms a page: forty of them cannot fit in a second however they are
+  // scheduled, so the deadline is what has to end this.
+  const server = await slowServer(pages, 200);
+  try {
+    const budget = 1_000;
+    const startedAt = Date.now();
+    const result = await crawl(server.origin, {
+      userAgent: "test",
+      seed: { url: `${server.origin}/`, html: pages["/"] },
+      deadline: new Deadline(budget),
+    });
+    const elapsed = Date.now() - startedAt;
+
+    assert.equal(result.partial, true, "a crawl cut short has to say so");
+    assert.ok(result.pages.length < 41, "it cannot have read the whole site");
+    // The margin is one page in flight per worker: the check refuses to START
+    // a page it cannot finish, and cannot interrupt one already running.
+    assert.ok(elapsed < budget + 2_000, `crawl overran its deadline: ${elapsed}ms against ${budget}ms`);
+  } finally {
+    server.close();
+  }
+});
+
+test("discovery that leaves no time to fetch anything is skipped", async () => {
+  // A sitemap fetched with nothing left to crawl afterwards costs the site a
+  // request and tells us nothing we can use.
+  const pages: Record<string, string> = {
+    "/": `<html><head><title>Home</title></head><body><a href="/a">A</a></body></html>`,
+    "/robots.txt": "",
+    "/sitemap.xml": `<urlset><url><loc>https://x.com/a</loc></url></urlset>`,
+    "/a": `<html><head><title>A</title></head></html>`,
+  };
+
+  const server = await slowServer(pages, 0);
+  try {
+    const result = await crawl(server.origin, {
+      userAgent: "test",
+      seed: { url: `${server.origin}/`, html: pages["/"] },
+      // Already spent: nothing may be started at all.
+      deadline: new Deadline(0),
+    });
+
+    assert.equal(result.partial, true);
+    assert.equal(result.fetched, 0, "no request may be made with no time to make one");
+    // The seed is still there: the caller already had it, so it costs nothing
+    // and a file naming one page beats a file naming none.
+    assert.equal(result.pages.length, 1);
+  } finally {
+    server.close();
+  }
+});
+
+/** A site with a fixed, controllable delay on every response. */
+function slowServer(pages: Record<string, string>, delayMs: number) {
+  const server = createServer((request, response) => {
+    const path = (request.url ?? "/").split("?")[0];
+    const body = pages[path];
+    setTimeout(() => {
+      if (body === undefined) {
+        response.writeHead(404).end("no");
+        return;
+      }
+      const type = path.endsWith(".xml") ? "application/xml" : path.endsWith(".txt") ? "text/plain" : "text/html";
+      response.writeHead(200, { "content-type": type }).end(body);
+    }, delayMs);
+  });
+
+  return new Promise<{ origin: string; close: () => void }>((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ origin: `http://127.0.0.1:${port}`, close: () => server.close() });
+    });
+  });
+}
+
+test("the pacer refuses a turn that would arrive after the deadline", async () => {
+  // What took a twenty-second crawl to seventy. The queue is shared, so with
+  // four workers and news.ycombinator.com's ten-second crawl-delay the fourth
+  // worker's turn is forty seconds away - and it used to sleep for all of it,
+  // budget or no budget.
+  const pacer = new Pacer(200);
+
+  assert.equal(await pacer.wait(new Deadline(10_000)), true, "the first turn is now");
+  assert.equal(await pacer.wait(new Deadline(100)), false, "the second is 200ms out, with 100ms left");
+});
+
+test("a refused turn does not move the queue on", async () => {
+  // The worker is stopping. Consuming its slot would make the next one wait
+  // for a request that is never sent, which on a site asking for a ten-second
+  // delay is ten seconds of nothing.
+  const pacer = new Pacer(200);
+  assert.equal(await pacer.wait(new Deadline(10_000)), true);
+  assert.equal(await pacer.wait(new Deadline(100)), false);
+
+  const at = Date.now();
+  assert.equal(await pacer.wait(new Deadline(10_000)), true);
+  const waited = Date.now() - at;
+
+  // One interval, not two: the refusal above took no slot. Generous upper
+  // bound because a timer may fire late, but 400ms would mean it had.
+  assert.ok(waited < 380, `waited ${waited}ms, so the refused turn had consumed a slot`);
+});
+
+test("the pacer reserves what the caller still needs after waiting", async () => {
+  // Otherwise a worker sleeps to the very edge of the budget and fetches
+  // nothing with what is left.
+  const pacer = new Pacer(200);
+  assert.equal(await pacer.wait(new Deadline(10_000)), true, "first turn, no wait");
+
+  assert.equal(await pacer.wait(new Deadline(250), 100), false, "200ms wait + 100ms of work > 250ms");
+  assert.equal(await pacer.wait(new Deadline(250), 10), true, "200ms wait + 10ms of work fits");
+});
+
+test("without a deadline the pacer behaves as it always did", async () => {
+  // Every caller outside a crawl passes nothing, and paces rather than stops.
+  const pacer = new Pacer(0);
+  assert.equal(await pacer.wait(), true);
+  assert.equal(await pacer.wait(), true);
 });

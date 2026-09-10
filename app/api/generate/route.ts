@@ -13,6 +13,7 @@ import { authConfigured } from "@/lib/supabase/config";
 import { getUser } from "@/lib/supabase/server";
 import { readGeneration, storeConfigured, writeGeneration } from "@/lib/store";
 import { validateLlmsTxt } from "@/lib/spec";
+import { Deadline, REQUEST_BUDGET_MS } from "@/lib/deadline";
 
 /**
  * Generating an llms.txt: crawl the site, run the models over what was found,
@@ -69,9 +70,21 @@ export async function POST(request: Request) {
     }
   }
 
+  /*
+   * One clock for everything below.
+   *
+   * Started after the gate rather than at the top of the handler, so a caller
+   * who has to sign in is not charged for the check. Every network step from
+   * here takes the shorter of its own cap and what this has left, and the
+   * handler returns whatever it has when the clock runs out - rather than
+   * being killed by the platform partway through, which returns nothing,
+   * stores nothing, and leaves the next attempt to fail identically.
+   */
+  const deadline = new Deadline(REQUEST_BUDGET_MS);
+
   let page;
   try {
-    page = await fetchPage(url);
+    page = await fetchPage(url, deadline);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not fetch that URL.";
     // A refused host is the caller's mistake; a failed fetch is the site's.
@@ -104,7 +117,7 @@ export async function POST(request: Request) {
   // list says which files this project wrote and which it merely found, and so
   // the scheduled check knows to re-read their file rather than crawl.
   if (body.regenerate !== true) {
-    const published = await findPublished(page.url, USER_AGENT, seed.existingLlmsTxt);
+    const published = await findPublished(page.url, USER_AGENT, seed.existingLlmsTxt, deadline);
     if (published) {
       const kept = storeConfigured()
         ? await writeGeneration(url, published.llmsTxt, { source: "published", publishedAt: published.url })
@@ -121,7 +134,7 @@ export async function POST(request: Request) {
     }
   }
 
-  const generated = await generate(page.body, page.url, { seed });
+  const generated = await generate(page.body, page.url, { seed, deadline });
   let extraction = generated.extraction;
 
   // Nothing extracted is worth a second look: some sites serve a challenge
@@ -140,13 +153,31 @@ export async function POST(request: Request) {
     }
   }
 
-  const { llmsTxt, report } = await enhance(extraction, page.url);
+  const { llmsTxt, report } = await enhance(extraction, page.url, undefined, deadline);
   const issues = validateLlmsTxt(llmsTxt);
 
-  // Saved without conditions. Generating needs an account, which is what keeps
-  // this table honest; nothing else has to be weighed.
+  /*
+   * A file cut short by the clock is stored, but without a fingerprint.
+   *
+   * Refusing to store it was tried here and undone: it recreates the dead zone
+   * this deadline exists to remove. A site slow enough to always run out of
+   * time would always be partial, so it would never acquire a file at all -
+   * which is the original bug wearing a better error message. It also puts
+   * back the "was the crawl complete" condition that #13 removed on purpose.
+   *
+   * What must not be stored is the structure hash. Which pages a partial crawl
+   * holds depends on how fast the site was today, so a fingerprint taken from
+   * one would report a change on every subsequent check and the site would be
+   * rewritten forever. A null hash already means "no baseline" to the monitor,
+   * which takes a fresh one from its own complete crawl and improves the file
+   * then.
+   */
+  const partial = generated.crawl?.partial === true;
   const stored = storeConfigured()
-    ? await writeGeneration(url, llmsTxt, { structureHash: structureHash(extraction), source: "generated" })
+    ? await writeGeneration(url, llmsTxt, {
+        structureHash: partial ? undefined : structureHash(extraction),
+        source: "generated",
+      })
     : false;
 
   return NextResponse.json({
@@ -154,6 +185,7 @@ export async function POST(request: Request) {
     llmsTxt,
     saved: false,
     stored,
+    partial,
     crawl: generated.crawl,
     report,
     spec: { valid: issues.length === 0, issues },

@@ -6,6 +6,7 @@ import { runAnnotation } from "./annotate.ts";
 import { runGuide } from "./guide.ts";
 import { type FailureKind, ModelError, isFatal } from "./errors.ts";
 import { guideModel, workerModel } from "./models.ts";
+import { Deadline } from "../deadline.ts";
 
 /**
  * The whole sieve, end to end: guide, then annotate, then keep only what
@@ -25,6 +26,13 @@ import { guideModel, workerModel } from "./models.ts";
  * open past the function's own limit.
  */
 const BUDGET_MS = 35_000;
+
+/**
+ * Below this there is no point starting. The guide alone takes a second or
+ * two, and a run that aborts every chunk costs the site nothing but costs the
+ * caller the wait.
+ */
+const MINIMUM_MS = 5_000;
 
 export interface EnhanceResult {
   llmsTxt: string;
@@ -48,10 +56,30 @@ export async function enhance(
   extraction: Extraction,
   url: string,
   transports?: { guide: Transport; worker: Transport },
+  requestDeadline?: Deadline,
 ): Promise<EnhanceResult> {
   const deterministic = render(extraction, url);
   const report = emptyReport();
   const models = { guideModel: guideModel().id, workerModel: workerModel().id };
+
+  /*
+   * The models run last, so they inherit whatever the crawl left behind.
+   *
+   * BUDGET_MS stays the cap rather than the allowance: a fast site still gets
+   * the full thirty-five seconds that a live run showed were needed, and a
+   * slow one gets what remains. Below MINIMUM_MS there is no point starting -
+   * the guide alone takes a second or two and every chunk would abort - so the
+   * deterministic file is returned immediately instead of after a wait that
+   * can only end in nothing.
+   */
+  const available = requestDeadline ? Math.min(BUDGET_MS, requestDeadline.remaining()) : BUDGET_MS;
+  if (available < MINIMUM_MS) {
+    return {
+      llmsTxt: deterministic,
+      enhanced: false,
+      report: { ...report, ...models, reason: "no time left for the models" },
+    };
+  }
 
   const guideTransport = transports?.guide ?? openRouter(700);
   const workerTransport = transports?.worker ?? openRouter(900);
@@ -60,7 +88,7 @@ export async function enhance(
   // the rest is dropped. The abort is what stops a slow model from holding the
   // request open past the function's own limit.
   const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort(), BUDGET_MS);
+  const deadline = setTimeout(() => controller.abort(), available);
 
   try {
     // The guide runs first because its summary is context for every chunk.

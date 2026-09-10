@@ -9,6 +9,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
 import { type Block, detectBlock } from "./blocks.ts";
+import { Deadline } from "./deadline.ts";
 
 export interface FetchedPage {
   url: string;
@@ -21,7 +22,14 @@ export interface FetchedPage {
   block?: Block;
 }
 
-const FETCH_TIMEOUT_MS = 15_000;
+/**
+ * The page we were asked about, and the only one we cannot proceed without.
+ *
+ * Was 15s. A site that needs longer than ten to serve one page is not going to
+ * survive a fifty-page crawl, so the extra five bought nothing and was spent
+ * out of the same request budget as everything after it.
+ */
+const FETCH_TIMEOUT_MS = 10_000;
 const MAX_BYTES = 2_000_000;
 export const USER_AGENT = "llms-txt-generator/0.1 (+https://llmstxt.org)";
 
@@ -108,17 +116,18 @@ async function assertPublicUrl(url: string): Promise<void> {
  * A refusal is not an exception: a challenge page is a perfectly good HTTP
  * response, and the caller needs to know which of the two it received.
  */
-export async function fetchPage(url: string): Promise<FetchedPage> {
+export async function fetchPage(url: string, deadline?: Deadline): Promise<FetchedPage> {
   await assertPublicUrl(url);
 
-  return request(url, USER_AGENT);
+  return request(url, USER_AGENT, deadline);
 }
 
-async function request(url: string, userAgent: string): Promise<FetchedPage> {
+async function request(url: string, userAgent: string, deadline?: Deadline): Promise<FetchedPage> {
   const response = await fetch(url, {
     headers: { "User-Agent": userAgent, ...COMMON_HEADERS },
     redirect: "follow",
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    // Its own cap, or what is left of the request, whichever comes first.
+    signal: deadline ? deadline.signal(FETCH_TIMEOUT_MS) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
 
   // A public URL can redirect into the private range, so the address we

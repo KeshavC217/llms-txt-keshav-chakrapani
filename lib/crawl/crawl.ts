@@ -18,6 +18,7 @@ import { type Candidate, planCrawl } from "./plan.ts";
 import { Pacer } from "./pacer.ts";
 import { fetchRobots, isAllowed, type Robots } from "./robots.ts";
 import { fetchSitemap, sitemapCandidates } from "./sitemap.ts";
+import { Deadline } from "../deadline.ts";
 
 /**
  * One ceiling for every crawl.
@@ -27,10 +28,37 @@ import { fetchSitemap, sitemapCandidates } from "./sitemap.ts";
  */
 const MAX_PAGES = Number(process.env.CRAWL_MAX_PAGES ?? 50);
 
-/** A safety valve, not a budget: it should not normally be reached. */
+/**
+ * A safety valve, not a budget: it should not normally be reached.
+ *
+ * It is also no longer the only limit. When the caller passes a deadline, the
+ * crawl gets whichever of the two expires first, so a crawl that starts late
+ * because the site was slow to answer its first page is shortened rather than
+ * allowed to run the request past the function's ceiling.
+ *
+ * It was briefly cut to 20s while the deadline was being added, which cost
+ * airbnb.com two pages and nytimes.com seven for nothing: the deadline is what
+ * bounds the request now, so this only has to stop one site being crawled
+ * forever. The last PAGE_TIMEOUT_MS of it is unusable by design - a worker
+ * will not start a page it cannot finish - so the valve has to be the time
+ * worth spending plus that reserve.
+ */
 const TIME_BUDGET_MS = Number(process.env.CRAWL_TIME_BUDGET_MS ?? 25_000);
 const CONCURRENCY = Number(process.env.CRAWL_CONCURRENCY ?? 4);
-const PAGE_TIMEOUT_MS = 12_000;
+const PAGE_TIMEOUT_MS = 8_000;
+
+/**
+ * The least time worth starting a page with.
+ *
+ * Not the page timeout, which is what this was first written as and which threw
+ * away the last eight seconds of every crawl - airbnb.com lost ten pages to a
+ * reserve it never needed. A page started late is not an overrun, because its
+ * signal is already the shorter of PAGE_TIMEOUT_MS and what the budget has
+ * left: it either arrives inside the budget or is aborted exactly on it. So the
+ * only question is whether a second is long enough to be worth the request,
+ * rather than whether the whole timeout would fit.
+ */
+const MIN_ATTEMPT_MS = 1_000;
 
 export interface CrawlResult {
   pages: PageMeta[];
@@ -58,6 +86,8 @@ export interface CrawlOptions {
   exclude?: string[];
   /** The page already fetched by the caller, so it is not fetched twice. */
   seed: { url: string; html: string };
+  /** The request's clock. The crawl takes the earlier of this and its valve. */
+  deadline?: Deadline;
   brand?: string;
 }
 
@@ -66,10 +96,15 @@ const NON_PAGE =
   /\.(png|jpe?g|gif|svg|webp|avif|ico|css|js|mjs|json|xml|rss|atom|zip|gz|tgz|pdf|docx?|xlsx?|pptx?|mp[34]|webm|mov|woff2?|ttf|eot)$/i;
 
 export async function crawl(origin: string, options: CrawlOptions): Promise<CrawlResult> {
-  const started = Date.now();
   const host = new URL(origin).host;
 
-  const robots: Robots = await fetchRobots(origin, options.userAgent);
+  // Whichever expires first: the crawl's own valve, or what the request has
+  // left. Discovery is inside it too - a site that takes six seconds to serve
+  // robots.txt and its sitemap has six fewer seconds of pages, rather than six
+  // more seconds of request.
+  const budget = options.deadline ? options.deadline.limit(TIME_BUDGET_MS) : new Deadline(TIME_BUDGET_MS);
+
+  const robots: Robots = await fetchRobots(origin, options.userAgent, budget);
   const pacer = new Pacer(robots.crawlDelayMs);
 
   const seed = readPage(options.seed.html, options.seed.url, options.brand);
@@ -109,7 +144,11 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
   // The sitemap finds what nothing links to, which is most of a site.
   let fromSitemap = 0;
   for (const candidate of sitemapCandidates(origin, robots.sitemaps)) {
-    const entries = await fetchSitemap(candidate, options.userAgent);
+    // Discovery that leaves no time to fetch anything it found is wasted: the
+    // seed page's own links are already in hand and cost nothing.
+    if (!budget.allows(PAGE_TIMEOUT_MS)) break;
+
+    const entries = await fetchSitemap(candidate, options.userAgent, budget);
     for (const entry of entries) {
       const before = candidates.length;
       consider(entry.url, origin, entry.position);
@@ -132,7 +171,7 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
     const at = Date.now();
     const response = await fetch(url, {
       headers: { "User-Agent": options.userAgent, Accept: "text/html,application/xhtml+xml" },
-      signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
+      signal: budget.signal(PAGE_TIMEOUT_MS),
     });
 
     pacer.observe(Date.now() - at);
@@ -160,14 +199,28 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
 
     async function worker() {
       while (next < urls.length) {
-        if (Date.now() - started > TIME_BUDGET_MS) {
+        /*
+         * Can another page finish, rather than has the budget elapsed.
+         *
+         * The old check asked the second question, so a worker that passed it
+         * with a tenth of a second to spare still had a full page timeout
+         * ahead of it. The pacer answers for the wait, since only it knows how
+         * many workers are queued ahead of this one.
+         */
+        if (!budget.allows(MIN_ATTEMPT_MS)) {
           expired = true;
           return;
         }
 
         const index = next++;
         const url = urls[index];
-        await pacer.wait();
+
+        // Reserving enough to be worth a request, so a worker does not sleep
+        // to the very edge of the budget and fetch nothing with what is left.
+        if (!(await pacer.wait(budget, MIN_ATTEMPT_MS))) {
+          expired = true;
+          return;
+        }
 
         try {
           fetched += 1;
@@ -180,10 +233,19 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
           // Falls through to the retry below.
         }
 
-        // One retry, because a single transient failure would otherwise change
-        // the output and make an unchanged site look changed.
+        /*
+         * One retry, because a single transient failure would otherwise change
+         * the output and make an unchanged site look changed - but only while
+         * there is time for it. Unchecked, this was a second full wait and a
+         * second full page timeout past a budget already spent.
+         */
+        if (!budget.allows(MIN_ATTEMPT_MS) || !(await pacer.wait(budget, MIN_ATTEMPT_MS))) {
+          failed += 1;
+          expired = true;
+          return;
+        }
+
         try {
-          await pacer.wait();
           fetched += 1;
           const page = await attempt(url);
           if (page) results.set(index, page);

@@ -45,6 +45,7 @@ app/
   api/refresh/route.ts   POST, cron-authenticated: re-check what is due
 proxy.ts                 refreshes the Supabase session (Next 16's middleware)
 lib/
+  deadline.ts            one clock for the request, so the steps cannot outlast it
   fetchPage.ts           one page, with the SSRF guard and the block detector
   blocks.ts              telling a challenge page from a real one
   published.ts           finding and recognising a site's own llms.txt
@@ -221,10 +222,7 @@ score down. The signals to fix it are already in hand and unused: whether the ho
 page, its prominence in the nav, how many crawled pages link to it, its depth, whether it carries a
 description of its own.
 
-**A slow site can outlast the function.** The whole request - fetch, crawl, two model passes - has
-to finish inside Vercel's 60 seconds. The crawl has its own 25-second valve, but nothing budgets the
-request end to end, so a site as slow as `news.ycombinator.com` (61s locally, 8 of 49 pages) hits
-the platform limit and the caller gets a timeout rather than a partial answer.
+**A slow site used to outlast the function.** Fixed; see [One clock for the request](#one-clock-for-the-request).
 
 **A link with no note is left without one.** The template's rule is to omit rather than invent. The
 crawl fetches every page it lists, so most links now carry the page's own description; where a site
@@ -344,6 +342,71 @@ are.
 **Template descriptions are worse than none.** Sites set one description for every page - every
 getlago doc claims to be "Developer documentation for Lago's API-first billing platform". A
 description repeated across a fifth of the crawl is dropped, and the home page's specific note kept.
+
+## One clock for the request
+
+Every step had its own timeout and nothing bounded their sum. Each number was defensible alone -
+10s to fetch the page, 5s to look for a published file, 4s for `robots.txt`, 8s for a sitemap, 25s
+of crawling, 35s of models - and together they were roughly twice the sixty seconds a Vercel
+function is allowed.
+
+So on a slow site the platform killed the process partway through, which is the worst of the
+outcomes available:
+
+- the caller gets Vercel's own timeout page rather than JSON, so the interface can only say
+  *"something went wrong"*;
+- nothing is stored, because the write is the last line of a handler that was never reached;
+- and since nothing is stored, the next attempt starts from the beginning and dies in the same
+  place. **A site slow enough to trip this could never acquire a file at all**, however many times
+  anyone asked.
+
+That last one is why it is a bug rather than a slow path.
+
+`lib/deadline.ts` is one clock, started when the request arrives and passed down. Every network step
+takes the shorter of its own cap and what is left, and the handler returns what it has when the
+clock runs out.
+
+### What actually took seventy seconds
+
+The obvious culprit was the crawl asking the wrong question. It checked *has the budget elapsed*
+before starting a page, so a worker that passed with a tenth of a second to spare still had a full
+page timeout ahead of it. It now asks whether a page can still be started at all, and the page's own
+abort signal is the shorter of its cap and the remainder - so a page begun late is aborted exactly
+on the deadline rather than past it.
+
+That was not the big one. `news.ycombinator.com` asks for a **ten-second crawl delay** in its
+robots.txt, which is honoured; the pacer's queue is shared, so with four workers the fourth worker's
+turn is forty seconds away - and `pacer.wait()` slept for all of it without consulting any budget.
+The retry after a failed page did it a second time. A crawl budgeted at twenty seconds took seventy.
+
+`Pacer.wait()` now takes the deadline and returns false when the turn would arrive too late, so the
+worker stops instead of sleeping. A refused turn does not consume a slot, or the next worker would
+wait for a request that is never sent.
+
+| site | before | after |
+|---|---|---|
+| `news.ycombinator.com` | 71.2s, killed, no file | 28.4s, 4 pages, 23 notes |
+| `airbnb.com` | 27.9s | 37.9s, 47 of 49 pages |
+| `nytimes.com` | 60.9s at the ceiling | 38.0s, 32 pages |
+| `en.wikipedia.org` | 21s | 21.2s, complete |
+
+Hacker News gets four pages because it asked to be crawled once every ten seconds and that is what
+fifty seconds buys. Four pages with real notes is a file; a timeout is not.
+
+### A partial file is stored, without a fingerprint
+
+Refusing to store one was tried and undone: it recreates the dead zone the deadline exists to
+remove, since a site that always runs out of time would always be partial and so would never
+acquire a file. It also puts back the "was the crawl complete" condition that was deliberately
+removed when saving stopped having conditions.
+
+What must not be stored is the **structure hash**. Which pages a truncated crawl holds depends on
+how fast the site was that day, so a fingerprint taken from one would report a change on every
+subsequent check and the site would be rewritten forever. A null hash already means "no baseline" to
+the monitor, which takes a fresh one from its own complete crawl later.
+
+The response carries `partial: true` and the interface says so, with the page counts and a way to
+try again.
 
 ## The AI sieve
 
@@ -584,7 +647,7 @@ wrong and there is no account for them to sign in to.
 ## Tests
 
 ```bash
-npm test          # 159 tests, node --test, no framework and no dependencies
+npm test          # 171 tests, node --test, no framework and no dependencies
 npm run lint
 npm run typecheck
 ```

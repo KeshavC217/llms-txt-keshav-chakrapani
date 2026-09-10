@@ -1,3 +1,5 @@
+import { Deadline } from "../deadline.ts";
+
 /**
  * Sitemaps: the list of pages a site wants known.
  *
@@ -11,7 +13,8 @@
  * fewer URLs, which is the same outcome as a missing one.
  */
 
-const FETCH_TIMEOUT_MS = 12_000;
+/** Larger than a robots.txt - docs.stripe.com lists 4,693 URLs - but not 12s larger. */
+const FETCH_TIMEOUT_MS = 8_000;
 
 /** A sitemap index can name dozens; enough to be useful, bounded to be sane. */
 const MAX_INDEX_CHILDREN = 5;
@@ -29,11 +32,11 @@ function extract(xml: string, tag: string): string[] {
   );
 }
 
-async function fetchXml(url: string, userAgent: string): Promise<string | null> {
+async function fetchXml(url: string, userAgent: string, deadline?: Deadline): Promise<string | null> {
   try {
     const response = await fetch(url, {
       headers: { "User-Agent": userAgent, Accept: "application/xml,text/xml,*/*" },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal: deadline ? deadline.signal(FETCH_TIMEOUT_MS) : AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
 
     if (!response.ok) return null;
@@ -50,13 +53,17 @@ async function fetchXml(url: string, userAgent: string): Promise<string | null> 
  * One level, not arbitrarily deep: nesting past that is rare, and each level
  * multiplies the fetches before a single page has been read.
  */
-export async function fetchSitemap(sitemapUrl: string, userAgent: string): Promise<SitemapEntry[]> {
-  const xml = await fetchXml(sitemapUrl, userAgent);
+export async function fetchSitemap(
+  sitemapUrl: string,
+  userAgent: string,
+  deadline?: Deadline,
+): Promise<SitemapEntry[]> {
+  const xml = await fetchXml(sitemapUrl, userAgent, deadline);
   if (!xml) return [];
 
   if (/<sitemapindex/i.test(xml)) {
     const children = extract(xml, "loc").slice(0, MAX_INDEX_CHILDREN);
-    const pages = await Promise.all(children.map((child) => fetchXml(child, userAgent)));
+    const pages = await Promise.all(children.map((child) => fetchXml(child, userAgent, deadline)));
 
     return pages
       .filter((page): page is string => Boolean(page))

@@ -9,6 +9,8 @@ interface Result {
   /** True when this came from storage rather than from a fresh run. */
   saved?: boolean;
   stored?: boolean;
+  /** The clock ran out mid-crawl, so this is what was read rather than all of it. */
+  partial?: boolean;
   generatedAt?: string;
   source?: "published";
   publishedAt?: string;
@@ -155,6 +157,19 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
         <p className="mt-6 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
           {error}
         </p>
+      )}
+
+      {result?.partial && (
+        <div className="mt-6 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+          This site was slow enough that time ran out mid-crawl, so this covers{" "}
+          {result.crawl ? `${result.crawl.pages} of ${result.crawl.planned} pages` : "part of the site"} rather than all
+          of it.{" "}
+          {signedIn && (
+            <button type="button" className="underline" onClick={() => void run(result.url, true)}>
+              Try again
+            </button>
+          )}
+        </div>
       )}
 
       {result?.source === "published" && (
