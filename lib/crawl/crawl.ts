@@ -114,9 +114,20 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
   const seen = new Set<string>([seedUrl]);
   const candidates: Candidate[] = [];
 
+  /*
+   * How many times the site points at a page, which is the site voting on what
+   * matters. react.dev links /learn five times, /reference/react and /blog four
+   * - its three most important pages, and its three most-linked. Counted before
+   * the seen check, since the second and third mentions are the whole signal.
+   */
+  const inbound = new Map<string, number>();
+
   const consider = (href: string, base: string, sitemapPosition: number) => {
     const url = canonicalize(href, base);
-    if (!url || seen.has(url)) return;
+    if (!url) return;
+
+    inbound.set(url, (inbound.get(url) ?? 0) + 1);
+    if (seen.has(url)) return;
 
     let parsed: URL;
     try {
@@ -138,8 +149,12 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
     if (options.include?.length && !options.include.some((prefix) => path.startsWith(prefix))) return;
 
     seen.add(url);
-    candidates.push({ url, sitemapPosition, segments: path.split("/").filter(Boolean) });
+    candidates.push({ url, sitemapPosition, segments: path.split("/").filter(Boolean), inbound: 0 });
   };
+
+  /** Fills in the counts, which are only complete once discovery has finished. */
+  const withInbound = (list: Candidate[]) =>
+    list.map((candidate) => ({ ...candidate, inbound: inbound.get(candidate.url) ?? 0 }));
 
   // The sitemap finds what nothing links to, which is most of a site.
   let fromSitemap = 0;
@@ -276,7 +291,7 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
     const remaining = MAX_PAGES - 1 - fetchedPages.length;
     if (remaining <= 0) break;
 
-    const plan = planCrawl(candidates, remaining);
+    const plan = planCrawl(withInbound(candidates), remaining);
     if (plan.urls.length === 0) break;
 
     planned += plan.urls.length;
