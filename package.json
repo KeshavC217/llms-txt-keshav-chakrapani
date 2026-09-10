@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test",
+    "test": "node --import ./tests/setup.mjs --experimental-test-module-mocks --test",
     "bench": "node scripts/bench.mjs",
     "integration": "node scripts/integration.mjs",
     "typecheck": "next typegen && tsc --noEmit"

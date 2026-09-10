@@ -77,3 +77,91 @@ export function isDue(lastCheckedAt: string | null, intervalHours: number, now =
 export function sitemapHash(urls: string[]): string {
   return hashContent([...urls].sort().join("\n"));
 }
+
+/**
+ * What one run may still afford.
+ *
+ * This was arithmetic inside the refresh loop's worker, closed over two
+ * mutable counters, which made the one part of monitoring most worth testing
+ * the one part that could not be. The rules are small and the failure modes
+ * are all off-by-one, so they belong somewhere they can be exercised directly.
+ *
+ * Checks and regenerations are budgeted apart because they cost two orders of
+ * magnitude apart: a sitemap that has not moved settles a site in half a
+ * second, a rewrite takes about thirty. One "sites per run" number is too
+ * cautious for the first and reckless for the second.
+ */
+export class RunBudget {
+  private regenerations = 0;
+  private readonly maxRegenerations: number;
+  private readonly deadlineMs: number;
+  private readonly regenerationMs: number;
+  private readonly startedAt: number;
+
+  constructor(options: {
+    maxRegenerations: number;
+    /** How long the whole run may take. */
+    deadlineMs: number;
+    /** How long one regeneration takes, at worst. */
+    regenerationMs: number;
+    startedAt?: number;
+  }) {
+    this.maxRegenerations = options.maxRegenerations;
+    this.deadlineMs = options.deadlineMs;
+    this.regenerationMs = options.regenerationMs;
+    this.startedAt = options.startedAt ?? Date.now();
+  }
+
+  /** True once the run has spent its time and should stop taking rows. */
+  expired(now = Date.now()): boolean {
+    return now - this.startedAt > this.deadlineMs;
+  }
+
+  /**
+   * Takes a regeneration slot if there is one, returning whether it was taken.
+   *
+   * Claimed BEFORE the check runs rather than after, because the check is
+   * awaited: two workers that each looked at the count first would both see
+   * the last slot free and both take it. Claiming up front can waste a slot on
+   * a check that turns out not to need one, which is the cheaper mistake -
+   * `release` hands those back - where the alternative is three rewrites in a
+   * run built to afford two.
+   *
+   * A run also declines to *begin* a regeneration it has not the time to
+   * finish: the deadline cannot interrupt one that has started, and the first
+   * live run took 69 seconds and would have been killed mid-write.
+   */
+  claim(now = Date.now()): boolean {
+    const timeLeft = this.deadlineMs - (now - this.startedAt);
+    if (this.regenerations >= this.maxRegenerations || timeLeft <= this.regenerationMs) return false;
+
+    this.regenerations += 1;
+    return true;
+  }
+
+  /** Hands back a claim the check did not use. */
+  release(): void {
+    this.regenerations = Math.max(0, this.regenerations - 1);
+  }
+
+  get spent(): number {
+    return this.regenerations;
+  }
+}
+
+/**
+ * How long until this row is looked at again.
+ *
+ * A check that could not reach a conclusion - the site was blocked, served
+ * something that is not HTML, or gave a crawl cut short by its safety valve -
+ * must not move the interval in either direction. Treating "we could not tell"
+ * as "nothing changed" would widen the interval of exactly the sites that are
+ * hardest to read, until they were barely checked at all.
+ */
+export function intervalAfter(
+  currentHours: number,
+  outcome: { result: string; changed: boolean },
+): number {
+  const inconclusive = outcome.result === "skipped" || outcome.result === "baseline";
+  return inconclusive ? currentHours : nextInterval(currentHours, outcome.changed);
+}
