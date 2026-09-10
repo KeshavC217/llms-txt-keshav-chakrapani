@@ -119,8 +119,22 @@ page. Everything here is inferred from structure and word overlap.
   single `/docs` section. Locale segments are skipped, so `/docs/en/...` is not a section called
   "En". Names come from the page's own nav headings when one covers the group in both directions,
   else from the segment itself.
-- **Duplicates.** URLs are canonicalized (fragment, trailing slash, `index.html`, scheme) and
+- **Duplicates.** URLs are canonicalized (fragment, trailing slash, tracking parameters, scheme) and
   titles compared by stemmed token overlap, so "Pricing" and "Our Pricing" collapse to the shorter.
+  One canonicaliser, in `lib/crawl/url.ts` — there were three, and they disagreed.
+- **One entry per page.** A query string is usually a variant rather than a page: `airbnb.com`
+  linked its gift-card page ten times as `?card_name=arctic`, `&baths`, `&cozy`, and an entire
+  section of the file was one page under ten spellings. It cannot simply be dropped, because
+  `en.wikipedia.org` addresses every article as `/w/index.php?title=X`. What separates them is the
+  title, which the crawler has because it fetched the page: same address and same page-name is one
+  link, same address and different names is several. Titles are matched by containment rather than
+  equality, since the same page arrives as "Connections" from a link and "Connections - Group words
+  that share a common thread" from its own `<title>`.
+- **Operations are not pages.** `?action=edit`, `?action=history`, `?printable=yes`,
+  `?mobileaction=`, `?oldid=` and their siblings are dropped. Thirteen of the fifty-two links
+  generated for `en.wikipedia.org` were these — "Revision history", "Printable version", "Switch to
+  legacy parser". An llms.txt says what a site contains; it should never point an agent at an edit
+  form. `action` is matched on its value, because plenty of sites use `?action=` for real content.
 - **Notes.** Taken only from a container holding exactly one link — a card or list item, never a
   nav list, whose "neighbouring text" is just the other menu entries. Anything restating its own
   title, or reading as concatenated labels rather than prose, is dropped instead of padded out.
@@ -214,6 +228,11 @@ earlier version of the detector read the body alone and refused two working site
 only count when the status says we were refused.
 
 ### Known limits
+
+**`/w/index.php?title=X` is a program, not a directory.** Stripping `index.php` is right for
+`/docs/index.html` and wrong for a script invocation — it invented an address we had never fetched,
+and Wikipedia came out with both spellings of the same page in one file. The strip now only happens
+when there is no query string.
 
 **Nothing ranks pages by importance.** Within a section the plan orders by depth, then sitemap
 position, then alphabetically. With 4,693 candidates on `docs.stripe.com` and a budget of 50, that

@@ -23,6 +23,7 @@ import {
 } from "./dom.ts";
 import { MAX_LINKS_PER_SECTION, chooseDepth, curate, groupKeyFor } from "./grouping.ts";
 import { coverage, humanize, sentences, similarity, stripBrandSuffix, titleCase } from "./nlp.ts";
+import { canonicalize } from "./crawl/url.ts";
 import { escapeBlock, escapeInline, escapeLinkText, escapeUrl } from "./spec.ts";
 
 export interface LinkEntry {
@@ -45,14 +46,14 @@ export interface Extraction {
   /** The page arrived as a near-empty shell that builds itself in the browser. */
   clientRendered: boolean;
   /**
-   * The spec asks that links point at LLM-friendly content, and that pages
-   * advertise it: rel="alternate" type="text/markdown" for a markdown twin,
-   * rel="describedby" for the llms.txt already covering the page. Both are
-   * reported rather than acted on - a markdown twin for this one page says
-   * nothing verifiable about the pages it links to, and inventing .md URLs we
-   * have not fetched would be guessing.
+   * The spec asks that a page advertise the llms.txt covering it, with
+   * rel="describedby". Where one does, that is where to look first.
+   *
+   * A rel="alternate" type="text/markdown" twin used to be read here too, and
+   * was reported to nobody: it appeared in the API response, was never shown
+   * and never acted on, because a markdown twin for one page says nothing
+   * verifiable about the pages it links to.
    */
-  markdownAlternate?: string;
   existingLlmsTxt?: string;
 }
 
@@ -65,8 +66,6 @@ const CHROME_PATTERN =
 const OPTIONAL_PATTERN =
   /\b(privacy|terms|tos|legal|cookie|gdpr|imprint|impressum|disclaimer|accessibility|careers?|jobs|press|media-?kit|changelog|archive|sitemap|login|log-?in|signin|sign-?up|register|account|cart|checkout|rss|feed)\b/;
 
-/** Not pages: assets, downloads, feeds. */
-const NON_PAGE = /\.(png|jpe?g|gif|svg|webp|avif|ico|css|js|mjs|json|xml|rss|atom|zip|gz|tgz|pdf|docx?|xlsx?|pptx?|mp[34]|webm|mov|woff2?|ttf|eot)$/i;
 
 /**
  * Curation limits (TEMPLATE.txt rule 1: a curated file beats an exhaustive
@@ -235,23 +234,29 @@ function proseOf(main: ElementNode, summary: string | undefined): string[] {
 }
 
 /** Collapses the ways one page is written as several URLs. */
+/**
+ * Same-site links only, canonicalised the one way.
+ *
+ * This used to be a third copy of the rules in lib/crawl/url.ts, carrying the
+ * same index.php bug and none of the tracking or operation filtering - so the
+ * seed page and the crawl disagreed about what a URL was, and en.wikipedia.org
+ * ended up with both spellings of the same page in one file.
+ */
 function canonicalUrl(href: string, base: URL): URL | null {
-  let url: URL;
+  const canonical = canonicalize(href, base.toString());
+  if (!canonical) return null;
+
   try {
-    url = new URL(href.trim(), base);
+    const url = new URL(canonical);
+    // The crawler checks the host separately, against the origin it was given;
+    // here the page we were handed is the only reference there is.
+    if (url.host !== base.host) return null;
+
+    url.protocol = base.protocol;
+    return url;
   } catch {
     return null;
   }
-
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  if (url.host !== base.host) return null;
-  if (NON_PAGE.test(url.pathname)) return null;
-
-  url.hash = "";
-  url.protocol = base.protocol;
-  url.search = url.search === "?" ? "" : url.search;
-  url.pathname = url.pathname.replace(/\/index\.(html?|php)$/i, "/").replace(/(.)\/$/, "$1");
-  return url;
 }
 
 /**
@@ -514,7 +519,6 @@ export function extract(html: string, url: string): Extraction {
     siteName,
     summary,
     clientRendered: looksClientRendered(root, links.size),
-    markdownAlternate: resolve(linkRel(root, "alternate", "text/markdown"), base),
     existingLlmsTxt: resolve(linkRel(root, "describedby"), base),
     prose: proseOf(main, summary),
     sections: curate(sections),

@@ -126,7 +126,6 @@ export async function POST(request: Request) {
           sitemapHash: outcome.sitemapHash ?? row.sitemapHash ?? undefined,
           checkIntervalHours: interval,
           changed: outcome.changed,
-          changeCount: (row.changeCount ?? 0) + (outcome.changed ? 1 : 0),
           llmsTxt: outcome.llmsTxt,
         });
 

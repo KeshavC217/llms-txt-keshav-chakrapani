@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { ALLOW_ALL, isAllowed, parseRobots } from "../lib/crawl/robots.ts";
 import { sitemapCandidates } from "../lib/crawl/sitemap.ts";
 import { canonicalize } from "../lib/crawl/url.ts";
+import { curate, dedupeLinks } from "../lib/grouping.ts";
 import { Pacer } from "../lib/crawl/pacer.ts";
 import { readPage } from "../lib/pageMeta.ts";
 import { findPublished, publishedCandidates } from "../lib/published.ts";
@@ -456,4 +457,140 @@ test("without a deadline the pacer behaves as it always did", async () => {
   const pacer = new Pacer(0);
   assert.equal(await pacer.wait(), true);
   assert.equal(await pacer.wait(), true);
+});
+
+test("a script invocation is not treated as a directory index", () => {
+  // /docs/index.html is a directory index and the directory is the better
+  // address. /w/index.php?title=X is a program being called: stripping the
+  // script name invents an address we never fetched, and en.wikipedia.org was
+  // getting both spellings of the same page in one file.
+  assert.equal(canonicalize("/docs/index.html", "https://x.com/"), "https://x.com/docs");
+  assert.equal(
+    canonicalize("/w/index.php?title=Main_Page", "https://x.com/"),
+    "https://x.com/w/index.php?title=Main_Page",
+  );
+});
+
+test("an operation on a page is not a page", () => {
+  // Thirteen of Wikipedia's fifty-two links were these. An llms.txt says what a
+  // site contains; it must never point an agent at an edit form.
+  for (const href of [
+    "/w/index.php?title=Main_Page&action=edit",
+    "/w/index.php?title=Main_Page&action=history",
+    "/page?printable=yes",
+    "/page?mobileaction=toggle_view_mobile",
+    "/page?useparsoid=0",
+    "/w/index.php?title=X&oldid=12345",
+  ]) {
+    assert.equal(canonicalize(href, "https://x.com/"), null, href);
+  }
+
+  // But ?action= is common on ordinary pages, so only operation values count.
+  assert.ok(canonicalize("/shop?action=browse", "https://x.com/"));
+  assert.ok(canonicalize("/docs?version=2", "https://x.com/"));
+});
+
+test("one entry per page, where the query is a variant rather than the page", () => {
+  // airbnb.com linked its gift-card page ten times, so a whole section of the
+  // generated file was one page under ten spellings.
+  const variants = Array.from({ length: 6 }, (_, i) => ({
+    title: "Airbnb gift cards",
+    url: `https://x.com/gift/buy?country=US&card_name=v${i}`,
+  }));
+
+  const [section] = curate([
+    { name: "Gift", links: [{ title: "Airbnb gift cards", url: "https://x.com/gift/buy?country=US" }, ...variants] },
+  ]);
+
+  assert.equal(section.links.length, 1);
+  assert.equal(section.links[0].url, "https://x.com/gift/buy?country=US", "the shortest form survives");
+});
+
+test("the same path with different titles is several pages, not one", () => {
+  // en.wikipedia.org addresses every article as /w/index.php?title=X. Folding
+  // on the path alone would collapse an encyclopedia into a single link, which
+  // is why the title has to be part of the question.
+  const [section] = curate([
+    {
+      name: "Wiki",
+      links: [
+        { title: "Kurultai", url: "https://x.com/w/index.php?title=Kurultai" },
+        { title: "English language", url: "https://x.com/w/index.php?title=English_language" },
+        { title: "Convoys in World War I", url: "https://x.com/w/index.php?title=Convoys" },
+      ],
+    },
+  ]);
+
+  assert.equal(section.links.length, 3);
+});
+
+test("the variant that says something outlives the one that does not", () => {
+  const [section] = curate([
+    {
+      name: "Help",
+      links: [
+        { title: "Contact us", url: "https://x.com/help/contact-us?entry=FOOTER" },
+        { title: "Contact us", url: "https://x.com/help/contact-us?entry=HOME", note: "Reach support by phone or chat." },
+      ],
+    },
+  ]);
+
+  assert.equal(section.links.length, 1);
+  assert.match(section.links[0].note ?? "", /phone or chat/);
+});
+
+test("the Optional list is deduplicated too", () => {
+  // Optional is a flat list rather than a Section, so it does not pass through
+  // curate. modal.com listed /signup twice there, once with ?next= attached.
+  const kept = dedupeLinks([
+    { title: "Signup", url: "https://x.com/signup?next=%2Fapps" },
+    { title: "Signup", url: "https://x.com/signup" },
+    { title: "Careers", url: "https://x.com/careers" },
+  ]);
+
+  assert.deepEqual(
+    kept.map((link) => link.url),
+    ["https://x.com/signup", "https://x.com/careers"],
+  );
+});
+
+test("a page linked from two sections is kept once", () => {
+  // Deduping within each section separately would miss this, and a site links
+  // the same page from more than one part of its navigation.
+  const sections = curate([
+    { name: "Docs", links: [{ title: "Pricing", url: "https://x.com/pricing?from=docs" }, { title: "A", url: "https://x.com/a" }] },
+    { name: "Company", links: [{ title: "Pricing", url: "https://x.com/pricing" }, { title: "B", url: "https://x.com/b" }] },
+  ]);
+
+  const urls = sections.flatMap((section) => section.links.map((link) => link.url));
+  assert.equal(urls.filter((url) => url.includes("/pricing")).length, 1);
+  assert.ok(urls.includes("https://x.com/pricing"), "the plain form is the one to keep");
+});
+
+test("the same page under a long title and a short one is one link", () => {
+  // nytimes.com offered both, because one title came from the page's own
+  // <title> and the other from the text of a link to it.
+  const kept = dedupeLinks([
+    {
+      title: "Connections - Group words that share a common thread",
+      url: "https://x.com/games/connections",
+      note: "A new puzzle each day.",
+    },
+    { title: "Connections", url: "https://x.com/games/connections?smid=nav" },
+  ]);
+
+  assert.equal(kept.length, 1);
+  assert.match(kept[0].note ?? "", /new puzzle/);
+});
+
+test("containment does not merge two real pages that share an address", () => {
+  // The risk the test above introduces. Every Wikipedia article is
+  // /w/index.php?title=X, so a short title contained in a longer one must not
+  // be enough on its own - these are different articles.
+  const kept = dedupeLinks([
+    { title: "Convoys", url: "https://x.com/wiki/Convoys" },
+    { title: "Convoys in World War I", url: "https://x.com/wiki/Convoys_in_World_War_I" },
+  ]);
+
+  assert.equal(kept.length, 2, "different addresses are different pages whatever the titles say");
 });
