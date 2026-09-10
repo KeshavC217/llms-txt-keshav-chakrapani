@@ -685,3 +685,48 @@ test("ranking keeps the plan a pure function of its input", () => {
 
   assert.deepEqual(planCrawl(input, 3).urls, planCrawl([...input].reverse(), 3).urls);
 });
+
+test("crawling reports settled pages, not raw attempts, as they finish", async () => {
+  // A retry must not double-count: a caller narrating "12 of 50" would read a
+  // failed-then-retried page as two, inflating the total past what is real.
+  const page = (title: string, links: string[] = []) =>
+    `<html><head><title>${title}</title></head><body>${links
+      .map((href) => `<a href="${href}">${href}</a>`)
+      .join("")}</body></html>`;
+
+  const pages: Record<string, string> = {
+    "/": page("Home", ["/a", "/b", "/c"]),
+    "/a": page("A"),
+    "/b": page("B"),
+    "/c": page("C"),
+    "/robots.txt": "",
+  };
+
+  const server = await slowServer(pages, 0);
+  const events: { fetched: number; planned: number }[] = [];
+
+  try {
+    const result = await crawl(server.origin, {
+      userAgent: "test",
+      seed: { url: `${server.origin}/`, html: pages["/"] },
+      onProgress: (event) => events.push({ fetched: event.fetched, planned: event.planned }),
+    });
+
+    // The first event fires before anything is known, so a caller does not
+    // sit on "Fetching the page" while robots.txt and the sitemap are read.
+    assert.deepEqual(events[0], { fetched: 0, planned: 0 });
+
+    // Three pages settle (the seed itself is not fetched, so is not counted),
+    // each strictly further along than the last.
+    const settled = events.slice(1);
+    assert.equal(settled.length, 3);
+    assert.deepEqual(
+      settled.map((e) => e.fetched),
+      [1, 2, 3],
+    );
+    assert.ok(settled.every((e) => e.planned === 3), "planned does not change mid-wave");
+    assert.equal(result.pages.length, 4, "the seed plus the three crawled pages");
+  } finally {
+    server.close();
+  }
+});

@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useState } from "react";
 
+import { describeProgress, type ProgressEvent } from "@/lib/progress";
+
 interface Result {
   url: string;
   llmsTxt: string;
@@ -18,6 +20,9 @@ interface Result {
   report?: { notesAccepted: number; sectionsRenamed: number; chunksFailed: number; workerModel: string };
   spec?: { valid: boolean; issues: { line: number; message: string }[] };
 }
+
+/** One line of what /api/generate streamed back, before the type is known. */
+type StreamedLine = ({ type: "progress" } & ProgressEvent) | ({ type: "result" } & Record<string, unknown>);
 
 export interface SavedSite {
   url: string;
@@ -53,6 +58,56 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<ProgressEvent | null>(null);
+
+  /**
+   * Reads /api/generate's streamed body as it arrives - one JSON object per
+   * line - rather than waiting for the whole response, which is the entire
+   * point: a caller watching this update lives through the wait rather than
+   * finding out afterward what it was waiting on.
+   *
+   * Every response starts as `application/json`, whether the answer came back
+   * immediately (a saved file, a validation error) or the server committed to
+   * doing the work; only the second case switches content types, and that is
+   * the flag this branches on.
+   */
+  async function consumeStream(response: Response): Promise<void> {
+    if (!response.body) throw new Error("Something went wrong.");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      let newline: number;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (!line.trim()) continue;
+
+        const event = JSON.parse(line) as StreamedLine;
+        if (event.type === "progress") {
+          setProgress(event);
+          continue;
+        }
+
+        // The result line, whichever way the request ended. `ok` is the
+        // outcome - the HTTP status this would have been without streaming
+        // has already been spent making the response 200, so it travels here
+        // instead.
+        if (event.ok) {
+          setResult(event as unknown as Result);
+        } else {
+          throw new Error((event.error as string | undefined) ?? "Something went wrong.");
+        }
+      }
+    }
+  }
 
   /**
    * `force` is a parameter rather than read from state: setting state and
@@ -65,6 +120,7 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
     setLoading(true);
     setError(null);
     setResult(null);
+    setProgress(null);
 
     try {
       const response = await fetch("/api/generate", {
@@ -73,13 +129,18 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
         body: JSON.stringify({ url: target, regenerate: force }),
       });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Something went wrong.");
-      setResult(data);
+      if ((response.headers.get("content-type") ?? "").includes("application/x-ndjson")) {
+        await consumeStream(response);
+      } else {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error ?? "Something went wrong.");
+        setResult(data);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   }
 
@@ -143,6 +204,31 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
           {loading ? "Working…" : "Generate"}
         </button>
       </form>
+
+      {loading && (
+        <div className="mt-6" aria-live="polite">
+          {/*
+            React batches setResult/setError with the setLoading(false) that
+            follows them, so this never renders mid-transition to "done" - the
+            bar is simply replaced by the result or the error on the next
+            frame, rather than flashing a completed state of its own.
+          */}
+          {(() => {
+            const { percent, label } = progress ? describeProgress(progress) : { percent: 0, label: "Starting…" };
+            return (
+              <>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
+                  <div
+                    className="h-full rounded-full bg-neutral-900 transition-[width] duration-300 ease-out dark:bg-neutral-100"
+                    style={{ width: `${percent}%` }}
+                  />
+                </div>
+                <p className="mt-2 text-sm text-neutral-500">{label}</p>
+              </>
+            );
+          })()}
+        </div>
+      )}
 
       {!signedIn && (
         <p className="mt-3 text-sm text-neutral-500">

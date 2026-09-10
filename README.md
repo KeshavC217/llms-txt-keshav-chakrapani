@@ -46,6 +46,7 @@ app/
 proxy.ts                 refreshes the Supabase session (Next 16's middleware)
 lib/
   deadline.ts            one clock for the request, so the steps cannot outlast it
+  progress.ts            what "generating" is made of, so a stage becomes a label and a percent
   fetchPage.ts           one page, with the SSRF guard and the block detector
   blocks.ts              telling a challenge page from a real one
   published.ts           finding and recognising a site's own llms.txt
@@ -71,22 +72,47 @@ tests/
   *.test.ts              node:test suites, run with `npm test`
 ```
 
-`POST /api/generate` takes `{ "url": "example.com", "regenerate": false }` and returns:
+`POST /api/generate` takes `{ "url": "example.com", "regenerate": false }`. What comes back depends
+on whether there was any real work to do.
+
+**Nothing to do** - a saved file already answers the question - is a single `application/json`
+object, exactly as it always was:
 
 ```json
 {
   "url": "https://example.com/",
   "llmsTxt": "# Example\n\n> ...\n\n## Docs\n\n- [Quickstart](...): ...\n",
-  "crawl": { "pages": 50, "planned": 49, "failed": 0, "partial": false },
-  "report": { "notesAccepted": 44, "sectionsRenamed": 3, "chunksFailed": 0 },
-  "spec": { "valid": true, "issues": [] },
-  "stored": true
+  "saved": true,
+  "generatedAt": "2026-09-10T12:00:00.000Z",
+  "spec": { "valid": true, "issues": [] }
 }
 ```
 
-Three other shapes come back from the same endpoint: a stored file (`saved: true`, with
-`generatedAt`), a site's own file (`source: "published"`, with `publishedAt`), and a refusal
-(`blocked`, with the kind of block). `regenerate: true` skips both short circuits and crawls.
+**Real work** - fetching, maybe rendering, crawling, two model passes - is narrated as it happens
+rather than made the caller wait on in silence. The response is `application/x-ndjson`: one JSON
+object per line, streamed as each stage starts or a page or chunk settles, ending in one line that
+carries the outcome:
+
+```
+{"type":"progress","stage":"fetching"}
+{"type":"progress","stage":"crawling","fetched":1,"planned":42}
+{"type":"progress","stage":"crawling","fetched":2,"planned":42}
+...
+{"type":"progress","stage":"annotating","completed":3,"total":6}
+{"type":"result","ok":true,"status":200,"url":"...","llmsTxt":"...","crawl":{...},"report":{...},"spec":{...}}
+```
+
+The HTTP status is always 200 once the stream starts - there is nowhere left to put a different one
+- so `status` in the result line carries what it would have been: 502 for a blocked site, 415 for a
+non-HTML response, 400 for an unreachable host. `lib/progress.ts` is the shape of every progress
+line and the weights that turn a stage into a position on a bar; `app/Generator.tsx` is the reader,
+using `response.headers.get("content-type")` to tell the two shapes apart before choosing how to
+read the body.
+
+A stored file, a site's own file (`source: "published"`, with `publishedAt`), and a refusal
+(`blocked`, with the kind of block) are still the three outcomes a *finished* request can carry -
+that has not changed, only how a caller learns about the time in between. `regenerate: true` skips
+both short circuits and always streams.
 
 `TEMPLATE.txt` defines what is being aimed at, generalized from the spec at
 [llmstxt.org](https://llmstxt.org) and from 22 files sampled off
@@ -415,6 +441,32 @@ are.
 **Template descriptions are worse than none.** Sites set one description for every page - every
 getlago doc claims to be "Developer documentation for Lago's API-first billing platform". A
 description repeated across a fifth of the crawl is dropped, and the home page's specific note kept.
+
+## Narrating the wait
+
+Generating a site synchronously can take fifty seconds - a crawl, two model passes - and a caller
+watching a spinner for fifty seconds with no idea what it is waiting on reads as broken well before
+it reads as slow.
+
+The request stays synchronous: no queue, no worker, no second place a crawl can run. Moving
+crawling to a background job was built in full once - a `status` column, a GitHub Actions worker, a
+dispatch token - and closed unmerged: fifty pages fits the fifty-second budget after "One clock for
+the request" below, so the machinery bought no crawl that could not already be finished, only a
+second place a crawl could happen. What changes here is that the one function doing the work says
+what it is doing, streamed over the same response as it happens, rather than composed after the
+fact from a log line.
+
+Every stage that can report a count does - `crawling` carries `fetched`/`planned`, `annotating`
+carries `completed`/`total` - and every other stage is still a real step the server is doing right
+now, not a guess. `lib/progress.ts` turns a stage into a position on a bar; the weights there
+(`crawling` and `annotating` together are two-thirds of it, because that is where the time actually
+goes) are chosen from what these stages measure at in practice, and the file says plainly that the
+percentage is illustrative rather than a measurement, since fetching one page and annotating fifty
+links are not equal-sized units of anything.
+
+A site that needs no rendering never sees a "rendering" event; one that runs out of time before the
+models never sees "annotating". Skipped stages are simply absent rather than reported as instant, so
+the bar jumps over their share when they do not apply instead of pausing on a step that never ran.
 
 ## One clock for the request
 

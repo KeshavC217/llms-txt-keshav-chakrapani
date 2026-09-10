@@ -170,3 +170,47 @@ test("a hostile proposal cannot break the grammar", async () => {
   assert.deepEqual(validateLlmsTxt(result.llmsTxt), []);
   assert.doesNotMatch(result.llmsTxt, /\n## and starts a heading/);
 });
+
+test("enhance narrates its two stages as it goes", async () => {
+  const events: { stage: string; completed?: number; total?: number }[] = [];
+
+  const result = await enhance(
+    extraction(),
+    URL_,
+    { guide: fake('{"summary":"A queue that keeps every attempt."}'), worker: fake('{"notes":{}}') },
+    undefined,
+    (event) => events.push(event),
+  );
+
+  const stages = events.map((event) => event.stage);
+  assert.deepEqual(stages[0], "summarizing", "the guide runs first, so it is narrated first");
+  assert.ok(stages.slice(1).every((stage) => stage === "annotating"), "everything after is chunk progress");
+
+  const chunkCount = chunkLinks(extraction()).length;
+  assert.equal(events.length, 1 + chunkCount, "one summarizing event, then one per chunk");
+
+  const last = events.at(-1)!;
+  assert.equal(last.completed, chunkCount, "the count finishes exactly at the total");
+  assert.equal(last.total, chunkCount);
+  assert.equal(result.enhanced, true);
+});
+
+test("a request too close to its deadline is never narrated at all", async () => {
+  // Below MINIMUM_MS, enhance returns the deterministic file immediately
+  // rather than starting a call it cannot finish - so there is nothing to
+  // narrate, and the caller should not be told "summarizing" for work that
+  // never began.
+  const { Deadline } = await import("../lib/deadline.ts");
+  const events: unknown[] = [];
+
+  const result = await enhance(
+    extraction(),
+    URL_,
+    { guide: fake("{}"), worker: fake("{}") },
+    new Deadline(1),
+    (event) => events.push(event),
+  );
+
+  assert.equal(events.length, 0);
+  assert.equal(result.enhanced, false);
+});

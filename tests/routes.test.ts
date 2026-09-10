@@ -74,6 +74,23 @@ const post = (url: string, body: unknown) =>
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 
+/**
+ * Reads the streamed shape /api/generate uses once it commits to real work:
+ * one JSON object per line, the last one `{type:"result", ...}`. Tests read
+ * the whole body rather than a live reader, since nothing here needs to watch
+ * progress arrive - only that it did, and what the request ended with.
+ */
+async function readStream(response: Response): Promise<{ progress: Record<string, unknown>[]; result: Record<string, unknown> }> {
+  const lines = (await response.text())
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+  const result = lines.find((line) => line.type === "result");
+  assert.ok(result, "a stream that ends without a result line leaves the caller waiting forever");
+  return { progress: lines.filter((line) => line.type === "progress"), result: result! };
+}
+
 const realFetch = globalThis.fetch;
 
 /** Any request at all fails the test: these paths must not touch the network. */
@@ -168,8 +185,37 @@ test("regenerate skips the stored file and goes to the site", async () => {
   const seen = serve({});
   const response = await generate(post("/generate", { url: "example.com", regenerate: true }));
 
-  assert.notEqual(response.status, 200, "the stored file must not be served");
+  // regenerate commits to the real work, so the response is always the
+  // streamed shape now - the HTTP status can only say the stream started.
+  assert.equal(response.status, 200);
   assert.ok(seen.length > 0, "regenerate has to reach the network");
+
+  const { result } = await readStream(response);
+  assert.notEqual(result.llmsTxt, "# Stale\n", "the stored file must not be served");
+});
+
+test("a slow site is narrated, not left silent, while it is crawled", async () => {
+  // The point of streaming at all: a caller waiting fifty seconds should see
+  // why, not stare at a response that has not arrived yet.
+  currentUser = { id: "u1" };
+  const page = (title: string, links: string[] = []) =>
+    `<html><head><title>${title}</title></head><body>${links.map((href) => `<a href="${href}">${href}</a>`).join("")}</body></html>`;
+
+  serve({
+    "/": { body: page("Acme", ["/docs/a", "/docs/b"]) },
+    "/docs/a": { body: page("A") },
+    "/docs/b": { body: page("B") },
+    "/robots.txt": { body: "", type: "text/plain" },
+  });
+
+  const response = await generate(post("/generate", { url: "example.com" }));
+  assert.equal(response.headers.get("content-type"), "application/x-ndjson; charset=utf-8");
+
+  const { progress, result } = await readStream(response);
+
+  assert.ok(progress.some((event) => event.stage === "fetching"));
+  assert.ok(progress.some((event) => event.stage === "crawling"), "the crawl has to say it is crawling");
+  assert.equal(result.ok, true);
 });
 
 test("a site's own llms.txt is served and saved as theirs", async () => {
@@ -181,12 +227,13 @@ test("a site's own llms.txt is served and saved as theirs", async () => {
   });
 
   const response = await generate(post("/generate", { url: "example.com" }));
-  const body = await response.json();
+  const { progress, result } = await readStream(response);
 
   assert.equal(response.status, 200);
-  assert.equal(body.source, "published");
-  assert.equal(body.publishedAt, "https://example.com/llms.txt");
-  assert.equal(body.llmsTxt, published, "their file is served verbatim, not rewritten");
+  assert.equal(result.source, "published");
+  assert.equal(result.publishedAt, "https://example.com/llms.txt");
+  assert.equal(result.llmsTxt, published, "their file is served verbatim, not rewritten");
+  assert.ok(progress.some((event) => event.stage === "checking-published"));
 
   // Saved, but labelled - so the list can say which files this project wrote,
   // and so the scheduled check re-reads theirs instead of crawling.

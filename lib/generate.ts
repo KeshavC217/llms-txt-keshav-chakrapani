@@ -11,6 +11,7 @@ import { buildFromCrawl } from "./buildFromCrawl.ts";
 import { type Extraction, extract, linkCount } from "./naiveExtractor.ts";
 import { USER_AGENT } from "./fetchPage.ts";
 import { Deadline } from "./deadline.ts";
+import type { ProgressEvent } from "./progress.ts";
 
 export interface GenerateOptions {
   include?: string[];
@@ -19,6 +20,7 @@ export interface GenerateOptions {
   seed?: Extraction;
   /** The request's clock, so the crawl cannot outlive the request. */
   deadline?: Deadline;
+  onProgress?: (event: Extract<ProgressEvent, { stage: "crawling" }>) => void;
 }
 
 export interface GenerateResult {
@@ -56,6 +58,7 @@ export async function generate(html: string, url: string, options: GenerateOptio
     seed: { url, html },
     brand: single.siteName,
     deadline: options.deadline,
+    onProgress: options.onProgress,
   });
 
   // buildFromCrawl merges rather than replaces, so this cannot come back with
