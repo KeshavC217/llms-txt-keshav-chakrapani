@@ -465,10 +465,21 @@ which is the only step that costs anything.
 grown by half when it does not, bounded between an hour and a week. From a day, a busy site reaches
 hourly in five checks and a quiet one weekly in five.
 
-**A run is bounded by time and expense, not by a count of sites.** Twenty checks, at most two
+**A run is bounded by time and expense, not by a count of sites.** Forty checks, at most two
 rewrites, and a 45-second deadline - with a rewrite only begun when 35 seconds remain, because one
 takes about thirty and the deadline cannot interrupt work already started. The first live run took 69
-seconds and would have been killed mid-write by the function limit.
+seconds and would have been killed mid-write by the function limit, which on this plan is 60 seconds
+and not negotiable.
+
+Sites are checked four at a time. They are independent, so sequential checking bought nothing and
+cost capacity: five crawls used to fill the whole budget, where thirteen sites now take 11.2 seconds
+of it. The schedule runs every five minutes - GitHub's shortest interval - offset off the hour,
+because GitHub documents that scheduled events are delayed under load and that "high load times
+include the start of every hour".
+
+At that cadence a run can check forty sites, so four hundred stored sites are each looked at roughly
+every 45 minutes when checks are cheap. The number that binds first at real scale is rewrites: two a
+run is about 1,700 a day, and a site whose structure changes must wait its turn beyond that.
 
 Three states record nothing at all, each for the same reason: a check that reached no verdict must
 not look like a quiet site.

@@ -32,11 +32,25 @@ export const maxDuration = 60;
  * three seconds of a fifty-second budget - and too reckless for the expensive
  * one, where two regenerations already overrun.
  *
- * So: look at many, rewrite few, and stop on the clock.
+ * So: look at many, rewrite few, and stop on the clock. With four checks in
+ * flight, thirteen sites took 11.2 seconds of the forty-five available, so the
+ * count is what binds now rather than the deadline - which is the right way
+ * round, since the deadline is a safety net and not a plan.
  */
-const MAX_CHECKS = Number(process.env.MONITOR_CHECKS_PER_RUN ?? 20);
+const MAX_CHECKS = Number(process.env.MONITOR_CHECKS_PER_RUN ?? 40);
 const MAX_REGENERATIONS = Number(process.env.MONITOR_REGENERATIONS_PER_RUN ?? 2);
 const DEADLINE_MS = 45_000;
+
+/**
+ * Sites are checked several at a time.
+ *
+ * They are independent - different hosts, no shared state - so the only thing
+ * sequential checking bought was a longer run. It cost real capacity: five
+ * crawls filled the whole budget, where four at a time fit twenty. Per-host
+ * politeness is unaffected, since each site is a different host and the pacer
+ * still governs the requests within one crawl.
+ */
+const CHECK_CONCURRENCY = Number(process.env.MONITOR_CONCURRENCY ?? 4);
 
 /**
  * A regeneration is a crawl plus two model passes, and takes about thirty
@@ -73,61 +87,60 @@ export async function POST(request: Request) {
   );
 
   const checked: Record<string, string>[] = [];
+  const queue = due.slice(0, MAX_CHECKS);
+  let next = 0;
   let regenerations = 0;
 
-  for (const row of due.slice(0, MAX_CHECKS)) {
-    if (Date.now() - started > DEADLINE_MS) break;
+  async function worker() {
+    while (next < queue.length) {
+      if (Date.now() - started > DEADLINE_MS) return;
 
-    try {
-      // Once this run has rewritten its share, remaining sites are still
-      // checked - the cheap tiers cost almost nothing - but a site found to
-      // have changed is left for the next run rather than rushed.
-      const timeLeft = DEADLINE_MS - (Date.now() - started);
-      const outcome = await check(
-        row.url,
-        row.structureHash ?? null,
-        row.sitemapHash ?? null,
-        regenerations < MAX_REGENERATIONS && timeLeft > REGENERATION_MS,
-      );
-      // Only a rewrite counts against the budget. Taking a first fingerprint
-      // costs a crawl and no model call, and the deadline covers that.
-      if (outcome.result === "changed") regenerations += 1;
-      /*
-       * A deferral is not a check. Writing last_checked_at would push the row
-       * out by its own interval, so a change this run found and declined to
-       * act on would wait an hour rather than being taken up by the next run -
-       * which is the whole point of deferring rather than skipping.
-       *
-       * Nothing is recorded, so the row keeps its place at the front of the
-       * queue, ordered by least recently checked.
-       */
-      if (outcome.result === "deferred") {
-        checked.push({ url: row.url, result: outcome.result, next: "next run" });
-        continue;
+      const row = queue[next++];
+      try {
+        /*
+         * Both budgets are read and claimed here, before the await, so two
+         * workers cannot each see the last slot and take it. Claiming up front
+         * can waste a slot if the check turns out not to need it, which is the
+         * cheaper mistake: the alternative is three rewrites in a run built to
+         * afford two.
+         */
+        const timeLeft = DEADLINE_MS - (Date.now() - started);
+        const mayRegenerate = regenerations < MAX_REGENERATIONS && timeLeft > REGENERATION_MS;
+        if (mayRegenerate) regenerations += 1;
+
+        const outcome = await check(row.url, row.structureHash ?? null, row.sitemapHash ?? null, mayRegenerate);
+
+        // Hand back a claim the check did not use.
+        if (mayRegenerate && outcome.result !== "changed") regenerations -= 1;
+
+        if (outcome.result === "deferred") {
+          checked.push({ url: row.url, result: outcome.result, next: "next run" });
+          continue;
+        }
+
+        const inconclusive = outcome.result === "skipped" || outcome.result === "baseline";
+        const interval = inconclusive
+          ? (row.checkIntervalHours ?? 24)
+          : nextInterval(row.checkIntervalHours ?? 24, outcome.changed);
+
+        await recordCheck(row.url, {
+          structureHash: outcome.structureHash ?? row.structureHash ?? "",
+          sitemapHash: outcome.sitemapHash ?? row.sitemapHash ?? undefined,
+          checkIntervalHours: interval,
+          changed: outcome.changed,
+          changeCount: (row.changeCount ?? 0) + (outcome.changed ? 1 : 0),
+          llmsTxt: outcome.llmsTxt,
+        });
+
+        checked.push({ url: row.url, result: outcome.result, next: `${interval}h` });
+      } catch (error) {
+        // One site's failure must not end the run: the others are still due.
+        checked.push({ url: row.url, result: "error", detail: String(error).slice(0, 80) });
       }
-
-      // A check that could not reach a verdict is not evidence that the site
-      // is quiet, so it must not widen the interval towards weekly.
-      const inconclusive = outcome.result === "skipped" || outcome.result === "baseline";
-      const interval = inconclusive
-        ? (row.checkIntervalHours ?? 24)
-        : nextInterval(row.checkIntervalHours ?? 24, outcome.changed);
-
-      await recordCheck(row.url, {
-        structureHash: outcome.structureHash ?? row.structureHash ?? "",
-        sitemapHash: outcome.sitemapHash ?? row.sitemapHash ?? undefined,
-        checkIntervalHours: interval,
-        changed: outcome.changed,
-        changeCount: (row.changeCount ?? 0) + (outcome.changed ? 1 : 0),
-        llmsTxt: outcome.llmsTxt,
-      });
-
-      checked.push({ url: row.url, result: outcome.result, next: `${interval}h` });
-    } catch (error) {
-      // One site's failure must not end the run: the others are still due.
-      checked.push({ url: row.url, result: "error", detail: String(error).slice(0, 80) });
     }
   }
+
+  await Promise.all(Array.from({ length: Math.min(CHECK_CONCURRENCY, queue.length || 1) }, worker));
 
   return NextResponse.json({ checked, considered: due.length, ms: Date.now() - started });
 }

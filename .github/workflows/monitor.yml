@@ -5,17 +5,27 @@ name: Monitor
 # only wakes it up.
 on:
   schedule:
-    # Every fifteen minutes. This is not how often a site is checked - each row
-    # carries its own interval, from an hour to a week - it is how quickly a
-    # site that has become due gets picked up, and how fast the queue drains at
-    # five sites a run.
+    # Every five minutes, which is GitHub's shortest permitted interval, offset
+    # so it never fires on the hour: GitHub documents that scheduled events are
+    # delayed under load, that "high load times include the start of every
+    # hour", and that queued jobs may be dropped outright.
     #
-    # GitHub runs scheduled workflows on a best-effort basis and delays them
-    # under load, so treat the cadence as an upper bound. It also disables
-    # schedules on repositories with no activity for 60 days.
-    - cron: "*/15 * * * *"
+    # This is not how often a site is checked - each row carries its own
+    # interval, from an hour to a week. It is how quickly a site that has
+    # become due gets picked up, and how fast the queue drains.
+    #
+    # GitHub also disables schedules on repositories with no activity for 60
+    # days, so a quiet repository stops monitoring without saying so.
+    - cron: "2-59/5 * * * *"
   # Available by hand, which is how it gets tested without waiting six hours.
   workflow_dispatch:
+
+# A run that overruns must not have the next one pile up behind it: the
+# endpoint would hand both the same due rows, and they would crawl the same
+# sites twice.
+concurrency:
+  group: monitor
+  cancel-in-progress: false
 
 jobs:
   refresh:
