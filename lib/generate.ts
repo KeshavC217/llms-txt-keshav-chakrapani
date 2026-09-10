@@ -10,12 +10,15 @@ import { crawl } from "./crawl/crawl.ts";
 import { buildFromCrawl } from "./buildFromCrawl.ts";
 import { type Extraction, extract, linkCount } from "./naiveExtractor.ts";
 import { USER_AGENT } from "./fetchPage.ts";
+import { Deadline } from "./deadline.ts";
 
 export interface GenerateOptions {
   include?: string[];
   exclude?: string[];
   /** The seed page, already extracted, so a large page is not parsed twice. */
   seed?: Extraction;
+  /** The request's clock, so the crawl cannot outlive the request. */
+  deadline?: Deadline;
 }
 
 export interface GenerateResult {
@@ -52,6 +55,7 @@ export async function generate(html: string, url: string, options: GenerateOptio
     exclude: options.exclude,
     seed: { url, html },
     brand: single.siteName,
+    deadline: options.deadline,
   });
 
   // buildFromCrawl merges rather than replaces, so this cannot come back with
