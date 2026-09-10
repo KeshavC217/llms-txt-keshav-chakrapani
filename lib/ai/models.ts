@@ -50,4 +50,3 @@ export const guideModel = () => resolve(process.env.AI_GUIDE_MODEL, "gemini-3.5-
 /** Called once per chunk, so price and the slow tail both multiply. */
 export const workerModel = () => resolve(process.env.AI_WORKER_MODEL, "gemma-4-31b-it");
 
-export const aiConfigured = () => Boolean(process.env.OPENROUTER_API_KEY);
