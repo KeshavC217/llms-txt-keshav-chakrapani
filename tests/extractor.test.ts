@@ -166,3 +166,61 @@ test("the rendered order is title, summary, prose, sections, Optional last", () 
   assert.match(lines[1], /^> /);
   assert.equal(output.trimEnd().split("\n").filter((line) => line.startsWith("## ")).pop(), "## Optional");
 });
+
+test("a title the site serves for every page is not that page's title", async () => {
+  // resy.com builds itself in the browser, so every address returns the same
+  // 5KB shell titled "Resy | Right This Way". Crawling it produced a file whose
+  // links were thirty-seven identical "Right This Way", each having displaced
+  // the perfectly good name the rendered home page had for it.
+  const { buildFromCrawl } = await import("../lib/buildFromCrawl.ts");
+
+  const shell = (url: string) => ({ url, title: "Right This Way", links: [] });
+  const seed = extract(
+    `<html><head><title>Resy</title></head><body><main>
+       <ul>
+         <li><a href="/venues/carbone">Carbone</a></li>
+         <li><a href="/venues/essex">Essex</a></li>
+         <li><a href="/venues/torrisi">Torrisi</a></li>
+         <li><a href="/venues/umeko">Umeko</a></li>
+       </ul>
+     </main></body></html>`,
+    "https://resy.com/",
+  );
+
+  const built = buildFromCrawl(
+    ["/venues/carbone", "/venues/essex", "/venues/torrisi", "/venues/umeko"].map((path) =>
+      shell(`https://resy.com${path}`),
+    ),
+    seed,
+    "https://resy.com/",
+  );
+
+  const titles = [...built.sections.flatMap((section) => section.links), ...built.optional].map((link) => link.title);
+  assert.ok(titles.includes("Carbone"), "the name the link gave it survives");
+  assert.equal(
+    titles.filter((title) => title === "Right This Way").length,
+    0,
+    "the shell's title describes no page and must not displace one",
+  );
+});
+
+test("a title only a couple of pages share is still their own", async () => {
+  // The rule is repetition across the crawl, not any repetition at all: two
+  // pages legitimately called the same thing are not a template.
+  const { buildFromCrawl } = await import("../lib/buildFromCrawl.ts");
+
+  const pages = [
+    { url: "https://x.com/docs/a", title: "Overview", links: [] },
+    { url: "https://x.com/docs/b", title: "Overview", links: [] },
+    { url: "https://x.com/docs/c", title: "Streaming", links: [] },
+    { url: "https://x.com/docs/d", title: "Batching", links: [] },
+    { url: "https://x.com/docs/e", title: "Errors", links: [] },
+    { url: "https://x.com/docs/f", title: "Webhooks", links: [] },
+  ];
+
+  const seed = extract(`<html><head><title>X</title></head><body><a href="/docs/a">A</a></body></html>`, "https://x.com/");
+  const built = buildFromCrawl(pages, seed, "https://x.com/");
+  const titles = [...built.sections.flatMap((s) => s.links), ...built.optional].map((l) => l.title);
+
+  assert.ok(titles.includes("Overview"), "two of six is not a template");
+});

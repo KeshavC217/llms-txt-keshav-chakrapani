@@ -7,6 +7,7 @@ import { extract, linkCount } from "@/lib/naiveExtractor";
 import { fetchPage, normalizeUrl, USER_AGENT } from "@/lib/fetchPage";
 import { findPublished } from "@/lib/published";
 import { generate } from "@/lib/generate";
+import { renderConfigured, renderPage } from "@/lib/render";
 import { structureHash } from "@/lib/monitor";
 import { authConfigured } from "@/lib/supabase/config";
 import { getUser } from "@/lib/supabase/server";
@@ -105,7 +106,29 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "That URL is not an HTML page, so there is nothing to read." }, { status: 415 });
   }
 
-  const seed = extract(page.body, page.url);
+  let seed = extract(page.body, page.url);
+
+  /*
+   * A shell has nothing to describe, so read it the way a browser would.
+   *
+   * Only when the plain fetch found nothing: rendering costs seconds and a
+   * browser, and the great majority of sites need neither. `clientRendered`
+   * requires positive evidence - a script and an empty element for it to mount
+   * into - so a small complete page like example.com is not mistaken for one.
+   *
+   * The rendered page is adopted only if it actually found more, because a
+   * bigger page with nothing on it is not an improvement.
+   */
+  if (seed.clientRendered && linkCount(seed) === 0 && renderConfigured()) {
+    const rendered = await renderPage(page.url);
+    if (rendered) {
+      const fromBrowser = extract(rendered.html, rendered.url);
+      if (linkCount(fromBrowser) > linkCount(seed)) {
+        page = { ...page, url: rendered.url, body: rendered.html };
+        seed = fromBrowser;
+      }
+    }
+  }
 
   // If the site publishes its own, that is the answer: someone chose what
   // belonged in it. Saved like anything else, but marked as theirs - so the
