@@ -366,6 +366,16 @@ export async function completeGeneration(
       status: "ready",
       error: null,
       claimed_at: null,
+      /*
+       * Building a site IS looking at it, so this counts as its first check.
+       *
+       * Without it a fresh row has no last_checked_at, the monitor reads that
+       * as never-checked and therefore due, and the same worker pass that just
+       * built the site immediately crawls it again to ask whether it changed
+       * since a moment ago. Measured on airbnb.com: 16.9s to build, then 13s
+       * more to re-crawl it, for one site nobody had asked about twice.
+       */
+      last_checked_at: new Date().toISOString(),
     })
     .eq("url", url);
 

@@ -154,3 +154,16 @@ test("a conclusive check moves the interval", () => {
   assert.equal(intervalAfter(24, { result: "unchanged", changed: false }), 36);
   assert.equal(intervalAfter(24, { result: "unchanged-sitemap", changed: false }), 36);
 });
+
+test("a site just built is not immediately due for a check", () => {
+  // Building a site is looking at it, so completeGeneration records the moment
+  // as its first check. Without that, a fresh row has no last_checked_at, the
+  // monitor reads never-checked as due, and the same worker pass that built
+  // the site crawls it again to ask whether it changed since a moment ago -
+  // 16.9s to build airbnb.com and 13s more to re-read it, measured.
+  const now = Date.parse("2026-09-10T12:00:00Z");
+  const justNow = new Date(now - 1_000).toISOString();
+
+  assert.equal(isDue(justNow, 24, now), false);
+  assert.equal(isDue(null, 24, now), true, "a row that genuinely has never been checked still is");
+});
