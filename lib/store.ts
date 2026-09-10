@@ -54,6 +54,9 @@ import { SUPABASE_URL } from "./supabase/config.ts";
 
 const TABLE = "generations";
 
+const SELECT_COLUMNS =
+  "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, change_count, check_interval_hours, sitemap_hash";
+
 /** How long a stored file is served before it is generated afresh. */
 const MAX_AGE_MS = Number(process.env.GENERATION_MAX_AGE_MS ?? 24 * 60 * 60 * 1000);
 
@@ -62,6 +65,13 @@ export interface StoredGeneration {
   llmsTxt: string;
   contentHash: string;
   generatedAt: string;
+  /** Fingerprint of the site itself, model-free; see lib/monitor.ts. */
+  structureHash?: string | null;
+  lastCheckedAt?: string | null;
+  changedAt?: string | null;
+  changeCount?: number;
+  checkIntervalHours?: number;
+  sitemapHash?: string | null;
 }
 
 export const storeConfigured = () => Boolean(SUPABASE_URL && process.env.SUPABASE_SECRET_KEY);
@@ -93,7 +103,7 @@ export async function readGeneration(url: string): Promise<StoredGeneration | nu
 
   const { data, error } = await supabase
     .from(TABLE)
-    .select("url, llms_txt, content_hash, generated_at")
+    .select(SELECT_COLUMNS)
     .eq("url", url)
     .maybeSingle();
 
@@ -101,30 +111,116 @@ export async function readGeneration(url: string): Promise<StoredGeneration | nu
   // cached answer", which is a state this already handles.
   if (error || !data) return null;
 
+  return fromRow(data);
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function fromRow(row: any): StoredGeneration {
   return {
-    url: data.url,
-    llmsTxt: data.llms_txt,
-    contentHash: data.content_hash,
-    generatedAt: data.generated_at,
+    url: row.url,
+    llmsTxt: row.llms_txt,
+    contentHash: row.content_hash,
+    generatedAt: row.generated_at,
+    structureHash: row.structure_hash,
+    lastCheckedAt: row.last_checked_at,
+    changedAt: row.changed_at,
+    changeCount: row.change_count ?? 0,
+    checkIntervalHours: row.check_interval_hours ?? 24,
+    sitemapHash: row.sitemap_hash,
   };
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+/**
+ * The rows a scheduled check should look at, least recently checked first, so
+ * a run that can only manage a few takes the ones most overdue.
+ */
+export async function generationsToCheck(limit: number): Promise<StoredGeneration[]> {
+  const supabase = client();
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select(SELECT_COLUMNS)
+    .order("last_checked_at", { ascending: true, nullsFirst: true })
+    .limit(limit);
+
+  return error || !data ? [] : data.map(fromRow);
+}
+
+/**
+ * Records the outcome of a check. Written even when nothing changed - that is
+ * what moves the row down the queue and widens its interval.
+ */
+export async function recordCheck(
+  url: string,
+  update: {
+    structureHash: string;
+    sitemapHash?: string;
+    checkIntervalHours: number;
+    changed: boolean;
+    changeCount: number;
+    llmsTxt?: string;
+  },
+): Promise<boolean> {
+  const supabase = client();
+  if (!supabase) return false;
+
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from(TABLE)
+    .update({
+      structure_hash: update.structureHash,
+      sitemap_hash: update.sitemapHash ?? null,
+      check_interval_hours: update.checkIntervalHours,
+      last_checked_at: now,
+      change_count: update.changeCount,
+      ...(update.changed ? { changed_at: now } : {}),
+      // Only replaced when the site moved: an unchanged site keeps the file it
+      // already has, along with the date it was generated.
+      ...(update.llmsTxt ? { llms_txt: update.llmsTxt, content_hash: hashContent(update.llmsTxt), generated_at: now } : {}),
+    })
+    .eq("url", url);
+
+  return !error;
 }
 
 /**
  * Writes the generated file, replacing any previous one for the same URL.
  * Returns whether it was stored, which the caller reports rather than assumes.
  */
-export async function writeGeneration(url: string, llmsTxt: string): Promise<boolean> {
+export async function writeGeneration(url: string, llmsTxt: string, structureHash?: string): Promise<boolean> {
   const supabase = client();
   if (!supabase) return false;
 
-  const { error } = await supabase
-    .from(TABLE)
-    .upsert({
-      url,
-      llms_txt: llmsTxt,
-      content_hash: hashContent(llmsTxt),
-      generated_at: new Date().toISOString(),
-    });
+  const row = {
+    url,
+    llms_txt: llmsTxt,
+    content_hash: hashContent(llmsTxt),
+    generated_at: new Date().toISOString(),
+  };
 
-  return !error;
+  const { error } = await supabase.from(TABLE).upsert({ ...row, structure_hash: structureHash ?? null });
+  if (!error) return true;
+
+  /*
+   * The monitoring columns may not exist yet.
+   *
+   * Code and migration are deployed by different hands and rarely at the same
+   * moment. Without this, a deploy that lands first turns every write into a
+   * silent failure and caching simply stops - which is exactly what happened
+   * on the first run of this change locally. Writing the older shape keeps the
+   * feature that already worked working, and the next check fills in the
+   * fingerprint once the column is there.
+   */
+  // PGRST204 is what PostgREST returns for a column its schema cache does not
+  // know; 42703 is Postgres's own code for the same thing, kept in case the
+  // request ever reaches the database directly. The first is what actually
+  // came back when this was tried against the live project.
+  if (error.code === "PGRST204" || error.code === "42703") {
+    const { error: retry } = await supabase.from(TABLE).upsert(row);
+    return !retry;
+  }
+
+  return false;
 }
