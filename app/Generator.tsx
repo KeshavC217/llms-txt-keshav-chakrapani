@@ -21,6 +21,8 @@ export interface SavedSite {
   url: string;
   generatedAt: string;
   changedAt?: string | null;
+  /** "published" means the site wrote it; "generated" means this project did. */
+  source: string;
 }
 
 /** "3h ago", so a stored file says how old it is. */
@@ -177,7 +179,9 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
               {result.llmsTxt.length.toLocaleString()} chars
               {result.crawl && <> · {result.crawl.pages} pages crawled</>}
               {result.report && <> · {describeReport(result.report)}</>}
-              {result.saved && result.generatedAt && <> · generated {age(result.generatedAt)}</>}
+              {result.saved && result.generatedAt && (
+                <> · {result.source === "published" ? "read" : "generated"} {age(result.generatedAt)}</>
+              )}
               {result.stored && <> · saved</>}
               {result.spec && (
                 <>
@@ -225,7 +229,7 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
                   {site.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
                 </button>
                 <span className="shrink-0 text-neutral-500">
-                  {age(site.generatedAt)}
+                  {site.source === "published" ? "site's own" : "generated"} · {age(site.generatedAt)}
                   {site.changedAt ? " · updated since" : ""}
                 </span>
               </li>

@@ -28,6 +28,8 @@ export async function GET(request: Request) {
       llmsTxt: saved.llmsTxt,
       generatedAt: saved.generatedAt,
       changedAt: saved.changedAt,
+      source: saved.source,
+      publishedAt: saved.publishedAt,
       saved: true,
     });
   }

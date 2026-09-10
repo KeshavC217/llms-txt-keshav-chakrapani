@@ -61,6 +61,8 @@ export async function POST(request: Request) {
         url: saved.url,
         llmsTxt: saved.llmsTxt,
         saved: true,
+        source: saved.source,
+        publishedAt: saved.publishedAt,
         generatedAt: saved.generatedAt,
         spec: { valid: validateLlmsTxt(saved.llmsTxt).length === 0, issues: [] },
       });
@@ -98,16 +100,22 @@ export async function POST(request: Request) {
   const seed = extract(page.body, page.url);
 
   // If the site publishes its own, that is the answer: someone chose what
-  // belonged in it. Not saved - it is already published at its own address,
-  // and one request fetches it again.
+  // belonged in it. Saved like anything else, but marked as theirs - so the
+  // list says which files this project wrote and which it merely found, and so
+  // the scheduled check knows to re-read their file rather than crawl.
   if (body.regenerate !== true) {
     const published = await findPublished(page.url, USER_AGENT, seed.existingLlmsTxt);
     if (published) {
+      const kept = storeConfigured()
+        ? await writeGeneration(url, published.llmsTxt, { source: "published", publishedAt: published.url })
+        : false;
+
       return NextResponse.json({
         url: page.url,
         llmsTxt: published.llmsTxt,
         source: "published",
         publishedAt: published.url,
+        stored: kept,
         spec: { valid: published.conforms, issues: [] },
       });
     }
@@ -137,7 +145,9 @@ export async function POST(request: Request) {
 
   // Saved without conditions. Generating needs an account, which is what keeps
   // this table honest; nothing else has to be weighed.
-  const stored = storeConfigured() ? await writeGeneration(url, llmsTxt, structureHash(extraction)) : false;
+  const stored = storeConfigured()
+    ? await writeGeneration(url, llmsTxt, { structureHash: structureHash(extraction), source: "generated" })
+    : false;
 
   return NextResponse.json({
     url: page.url,
