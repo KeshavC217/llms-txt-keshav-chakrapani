@@ -5,6 +5,10 @@ name: Probe addresses
 # host? monitor.yml asserts it does, and that assertion was never measured.
 # Delete this workflow once the answer is recorded.
 on:
+  # Branch-scoped push, because workflow_dispatch only works for a workflow that
+  # already exists on the default branch, and this one never will.
+  push:
+    branches: [feat/background-crawl]
   workflow_dispatch:
 
 jobs:
