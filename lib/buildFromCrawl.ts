@@ -32,16 +32,32 @@ const MAX_NOTE_CHARS = 160;
  * note that is worse than useless - it is the same sentence under every link,
  * and it displaces the specific one the home page had.
  */
-function boilerplate(pages: PageMeta[]): Set<string> {
+function repeated(pages: PageMeta[], of: (page: PageMeta) => string | undefined): Set<string> {
   const counts = new Map<string, number>();
   for (const page of pages) {
-    const description = page.description?.trim();
-    if (description) counts.set(description, (counts.get(description) ?? 0) + 1);
+    const value = of(page)?.trim();
+    if (value) counts.set(value, (counts.get(value) ?? 0) + 1);
   }
 
   const threshold = Math.max(3, Math.ceil(pages.length * 0.2));
-  return new Set([...counts].filter(([, count]) => count >= threshold).map(([description]) => description));
+  return new Set([...counts].filter(([, count]) => count >= threshold).map(([value]) => value));
 }
+
+const boilerplate = (pages: PageMeta[]) => repeated(pages, (page) => page.description);
+
+/**
+ * Titles a site serves for every page, which are not that page's title.
+ *
+ * The same rule as descriptions, and it matters most on a site that builds
+ * itself in the browser. resy.com's every address returns the same 5KB shell
+ * titled "Resy | Right This Way", so crawling it produced a file whose links
+ * were thirty-seven identical "Right This Way" - each one having displaced the
+ * perfectly good name the rendered home page had for it.
+ *
+ * A title the site repeats across a fifth of the crawl is the template's, so
+ * whatever the page was called by the thing linking to it is better.
+ */
+const templateTitles = (pages: PageMeta[]) => repeated(pages, (page) => page.title);
 
 /** A description worth keeping: present, and not one the site serves everywhere. */
 function usable(description: string | undefined, repeated: Set<string>): string | undefined {
@@ -91,6 +107,7 @@ export function buildFromCrawl(pages: PageMeta[], base: Extraction, homeUrl: str
   for (const page of pages) upgraded.set(page.url.replace(/\/$/, ""), page);
 
   const repeated = boilerplate(pages);
+  const templated = templateTitles(pages);
   const home = (() => {
     try {
       return new URL(homeUrl).toString();
@@ -114,7 +131,10 @@ export function buildFromCrawl(pages: PageMeta[], base: Extraction, homeUrl: str
       url: link.url,
       // A crawled page's own title and description beat a name guessed from a
       // slug and a note borrowed from adjacent text.
-      title: crawled?.title || link.title,
+      // A crawled page's own title beats a name guessed from a slug - unless it
+      // is the one the site serves for everything, in which case it says
+      // nothing about this page and the linking text knows better.
+      title: (crawled && !templated.has(crawled.title.trim()) ? crawled.title : "") || link.title,
       // The home page's note stays unless the crawled page offers something of
       // its own. A description the site repeats everywhere is not something of
       // its own, and would displace a specific note with a generic one.
