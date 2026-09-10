@@ -257,13 +257,6 @@ Sites that need a browser and are reachable are handled. This one is left as a k
 and Wikipedia came out with both spellings of the same page in one file. The strip now only happens
 when there is no query string.
 
-**Nothing ranks pages by importance.** Within a section the plan orders by depth, then sitemap
-position, then alphabetically. With 4,693 candidates on `docs.stripe.com` and a budget of 50, that
-is the difference between a useful file and an arbitrary one, and it is what holds the coverage
-score down. The signals to fix it are already in hand and unused: whether the home page links to a
-page, its prominence in the nav, how many crawled pages link to it, its depth, whether it carries a
-description of its own.
-
 **A slow site used to outlast the function.** Fixed; see [One clock for the request](#one-clock-for-the-request).
 
 **A link with no note is left without one.** The template's rule is to omit rather than invent. The
@@ -369,6 +362,44 @@ moved and remains the weak axis: fifty pages is not a whole site.
 Those four numbers are the last measurement taken while there were two outputs to compare, kept
 because the comparison is the point. The current figure, one endpoint and a different sample, is
 under [Is the output any good?](#is-the-output-any-good) below.
+
+### Which fifty pages
+
+A budget of fifty against `linear.app`'s thousand candidates is mostly a question of which fifty, and
+until recently the answer was depth, then sitemap position, then **alphabetically** - which is to say
+arbitrarily.
+
+**How often the site links to a page decides.** That is the site voting on what matters, and it needs
+no judgement from us: `react.dev` links `/learn` five times and `/reference/react` and `/blog` four,
+which are exactly its three most important pages. It costs nothing to count and it is deterministic,
+which selection has to be - a model in this path would make two runs of an unchanged site pick
+different pages and rewrite the file forever.
+
+Where the signal is absent it is absent *uniformly*, so it falls through to depth rather than
+misleading. A site whose candidates all come from a sitemap mentions each exactly once.
+
+It grows as the crawl proceeds, because a link from a crawled page counts too:
+
+| site | wave 0 | wave 1 |
+|---|---|---|
+| `modal.com` | 42 candidates, 7 linked more than once | 363 candidates, **171** linked more than once, most-linked 22 times |
+| `docs.convex.dev` | 401 candidates, 59 linked more than once | 356 candidates, **208** linked more than once, most-linked 50 times |
+
+Convex is the case where rendering and ranking compose: it is an application shell, so without a
+browser its home page offers no links at all and every candidate arrives from the sitemap with a
+count of one. Rendering gives the seed its fifty-nine links, and those links are what the ranking
+then has to work with.
+
+**Sections get budget in proportion to their size, with a floor of one.** A turn each was the first
+rule and it treats a section of two hundred documentation pages and one of two careers pages as
+equally important. The floor is what stops a large section starving a small one; where there are more
+sections than budget, the largest are the ones described, because taking one page each from eighty
+sections describes nothing. Allocation is by largest remainder with every tie broken by name, so the
+same site always produces the same quotas.
+
+Measured honestly, the ranking changes 5 of 50 pages on `nytimes.com` and none on a site whose
+budget is filled from a sitemap in a single wave. It is a floor on how arbitrary the selection can
+be rather than a transformation of it.
 
 ### Three things testing changed
 

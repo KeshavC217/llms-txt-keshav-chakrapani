@@ -187,9 +187,10 @@ test("a published file is recognised by shape, not by conformance", async () => 
   }
 });
 
-const candidate = (url: string, sitemapPosition = Number.MAX_SAFE_INTEGER) => ({
+const candidate = (url: string, sitemapPosition = Number.MAX_SAFE_INTEGER, inbound = 0) => ({
   url,
   sitemapPosition,
+  inbound,
   segments: new URL(url).pathname.split("/").filter(Boolean),
 });
 
@@ -593,4 +594,94 @@ test("containment does not merge two real pages that share an address", () => {
   ]);
 
   assert.equal(kept.length, 2, "different addresses are different pages whatever the titles say");
+});
+
+test("a section gets budget in proportion to how much of the site it is", () => {
+  // A turn each treats every section as equally important, which on a
+  // documentation site is plainly wrong: 200 pages of docs and 2 of careers
+  // are not two things of equal weight.
+  const many = Array.from({ length: 200 }, (_, i) => candidate(`https://x.com/docs/${i}`));
+  const few = [candidate("https://x.com/careers/a"), candidate("https://x.com/careers/b")];
+
+  const plan = planCrawl([...many, ...few], 50);
+  const docs = plan.urls.filter((url) => url.includes("/docs/")).length;
+  const careers = plan.urls.filter((url) => url.includes("/careers/")).length;
+
+  assert.ok(docs > careers * 5, `docs took ${docs} and careers ${careers}`);
+  assert.ok(careers >= 1, "but the smaller section is not starved");
+  assert.equal(plan.urls.length, 50, "and the budget is spent");
+});
+
+test("a section smaller than its share does not waste the budget", () => {
+  // Sections that run out early hand what is left back, or a site with one
+  // large section and several tiny ones would crawl well under its limit.
+  const plan = planCrawl(
+    [
+      ...Array.from({ length: 90 }, (_, i) => candidate(`https://x.com/docs/${i}`)),
+      candidate("https://x.com/about/a"),
+      candidate("https://x.com/legal/a"),
+    ],
+    50,
+  );
+
+  assert.equal(plan.urls.length, 50);
+});
+
+test("with more sections than budget, the largest are the ones described", () => {
+  // Taking one page each from eighty sections describes nothing.
+  const candidates = [
+    ...Array.from({ length: 30 }, (_, i) => candidate(`https://x.com/docs/${i}`)),
+    ...Array.from({ length: 20 }, (_, i) => candidate(`https://x.com/guides/${i}`)),
+    ...Array.from({ length: 60 }, (_, i) => candidate(`https://x.com/tiny${i}/a`)),
+  ];
+
+  const plan = planCrawl(candidates, 10);
+  assert.equal(plan.urls.length, 10);
+  assert.ok(plan.urls.some((url) => url.includes("/docs/")), "the biggest section is represented");
+  assert.ok(plan.urls.some((url) => url.includes("/guides/")));
+});
+
+test("the page a site links to most is the page taken first", () => {
+  // react.dev links /learn five times, /reference/react and /blog four - which
+  // are exactly its three most important pages. That is the site voting, and
+  // it needs no judgement from us.
+  const plan = planCrawl(
+    [
+      candidate("https://x.com/docs/rarely", Number.MAX_SAFE_INTEGER, 1),
+      candidate("https://x.com/docs/often", Number.MAX_SAFE_INTEGER, 9),
+      candidate("https://x.com/docs/sometimes", Number.MAX_SAFE_INTEGER, 4),
+    ],
+    2,
+  );
+
+  assert.deepEqual(plan.urls, ["https://x.com/docs/often", "https://x.com/docs/sometimes"]);
+});
+
+test("where nothing is linked more than once, ranking falls through to depth", () => {
+  // docs.convex.dev fills its budget from the sitemap alone, so every
+  // candidate is mentioned exactly once and the signal is uniformly absent.
+  // It has to fall through rather than mislead.
+  const plan = planCrawl(
+    [
+      candidate("https://x.com/docs/a/b/c", Number.MAX_SAFE_INTEGER, 1),
+      candidate("https://x.com/docs/a", Number.MAX_SAFE_INTEGER, 1),
+      candidate("https://x.com/docs/a/b", Number.MAX_SAFE_INTEGER, 1),
+    ],
+    3,
+  );
+
+  assert.deepEqual(plan.urls, ["https://x.com/docs/a", "https://x.com/docs/a/b", "https://x.com/docs/a/b/c"]);
+});
+
+test("ranking keeps the plan a pure function of its input", () => {
+  // The property everything downstream rests on: an unchanged site must yield
+  // the same pages, or a content hash reports a change every run.
+  const input = [
+    candidate("https://x.com/a/1", 5, 3),
+    candidate("https://x.com/b/1", 5, 3),
+    candidate("https://x.com/a/2", 5, 3),
+    candidate("https://x.com/b/2", 2, 7),
+  ];
+
+  assert.deepEqual(planCrawl(input, 3).urls, planCrawl([...input].reverse(), 3).urls);
 });
