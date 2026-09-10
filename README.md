@@ -791,9 +791,30 @@ Work goes to `main` through a pull request. Opening one runs CI (lint and typech
 `.github/workflows/ci.yml`) and builds a Vercel preview, whose URL is commented on the PR.
 Merging deploys to production.
 
-`main` is protected: it takes a passing `ci` check and a PR to change it. Vercel builds previews
-on push regardless of CI, so a red check can sit next to a working preview — production is what
-the protection gates.
+`main` is protected: it takes a passing `ci` check and a PR to change it.
+
+**CI gates the deploy, not just the merge.** Branch protection stops a red pull request being
+merged, which sounds like enough and is not: Vercel's Git integration builds on every push to main,
+and it starts the moment the push lands - in parallel with that commit's CI run, not after it. A
+merge whose checks go red on main, an admin pushing directly, or a green PR that conflicts
+semantically with something merged a minute earlier all reach production without anything having
+agreed they should.
+
+`scripts/gate-deploy.mjs` runs as Vercel's Ignored Build Step (`vercel.json`). It waits for the `ci`
+check on the exact commit being deployed and skips the build if it did not pass, so production keeps
+the last good version instead of taking a broken one.
+
+It needs no credentials: the repository is public, so GitHub serves check runs for a commit to
+anyone who asks.
+
+Two things about it are deliberate and easy to get backwards. **The exit codes are inverted** -
+Vercel asks whether the build should be *ignored*, so 0 skips and 1 builds. And **anything it cannot
+resolve fails closed**: an unreachable GitHub, a check that never appears, a run still going after
+eight minutes all skip the deploy. Deploying because we could not find out whether the tests passed
+would make the gate decoration, and what a gate does when it cannot tell is the whole of its value.
+
+Previews are never gated. They are how a change is looked at before it is merged, and waiting for CI
+to see the thing CI is testing helps nobody.
 
 CI pins Node 24, and pins npm to the exact version that writes `package-lock.json`. npm decides how
 the wasm fallback dependencies are laid out in the lock file, and `npm ci` rejects a layout it would
