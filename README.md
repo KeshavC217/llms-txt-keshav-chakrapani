@@ -227,6 +227,29 @@ A caution learned the hard way: Cloudflare leaves its scripts in the pages it pr
 earlier version of the detector read the body alone and refused two working sites. Body markers now
 only count when the status says we were refused.
 
+### One site this does not solve: resy.com
+
+Rendering fixes `docs.convex.dev` everywhere - 0 links from a fetch, 25 in the generated file, on the
+deployment as well as a laptop. `resy.com` is fixed only on a laptop.
+
+| where | result |
+|---|---|
+| laptop, headless Chromium | 222 links |
+| laptop, through the full pipeline | 39 rendered, 42 in the file |
+| the Vercel deployment | **0 links, in about three seconds** |
+
+Three seconds is the finding rather than the zero: a render takes ten or more, so on the deployment
+the browser is not producing anything for this site. Chromium itself is fine there - convex proves
+that on the same deploy - so it is something about resy and that address, most likely its bot
+protection treating a datacentre differently from a residential connection. That has not been
+demonstrated, and it is recorded here as unexplained rather than dressed up.
+
+One thing that is **not** the explanation, though it looked like it: the `>` line differing between
+runs. That is written by the model, not read from the page, so two runs of the same site produce two
+summaries. It was briefly mistaken for the site serving different content, which it is not.
+
+Sites that need a browser and are reachable are handled. This one is left as a known gap.
+
 ### Known limits
 
 **`/w/index.php?title=X` is a program, not a directory.** Stripping `index.php` is right for
