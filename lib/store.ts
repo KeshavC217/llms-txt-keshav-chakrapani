@@ -7,7 +7,7 @@ import { SUPABASE_URL } from "./supabase/config.ts";
  * Storage for generated files.
  *
  * The decision, recorded because it is the kind that is expensive to reverse:
- * generations are stored GLOBALLY, and only when the AI pass produced them.
+ * generations are stored GLOBALLY, keyed by URL alone.
  *
  * Global rather than per user. The file is derived entirely from public pages,
  * so two people asking about the same site should get the same answer. Storing
@@ -73,9 +73,6 @@ const SUMMARY_COLUMNS = `${BASE_SUMMARY}, changed_at, source`;
 const isMissingColumn = (error: { code?: string } | null) =>
   error?.code === "PGRST204" || error?.code === "42703";
 
-/** How long a stored file is served before it is generated afresh. */
-const MAX_AGE_MS = Number(process.env.GENERATION_MAX_AGE_MS ?? 24 * 60 * 60 * 1000);
-
 export interface StoredGeneration {
   url: string;
   llmsTxt: string;
@@ -110,11 +107,6 @@ function client() {
 /** What monitoring will compare to notice a site has changed. */
 export function hashContent(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 32);
-}
-
-export function isFresh(generatedAt: string, now = Date.now()): boolean {
-  const age = now - Date.parse(generatedAt);
-  return Number.isFinite(age) && age >= 0 && age < MAX_AGE_MS;
 }
 
 export async function readGeneration(url: string): Promise<StoredGeneration | null> {
