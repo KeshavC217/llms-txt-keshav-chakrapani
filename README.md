@@ -444,6 +444,44 @@ Storage is an optimisation, not a dependency. A missing table, a revoked key or 
 database all mean "no cached answer", which is a state the endpoint already handles - verified by
 running against the live project before the table existed.
 
+## Keeping files current
+
+A site reorganises its documentation and the file we generated for it quietly becomes wrong.
+`POST /api/refresh`, called every fifteen minutes by `.github/workflows/monitor.yml`, re-checks
+stored sites and rewrites the ones that moved.
+
+**Two hashes, and the difference between them is the design.** `content_hash` fingerprints the file
+we serve, which is AI-assisted: models are asked at temperature zero but not promised to be
+identical, so a change there proves nothing about the site. `structure_hash` fingerprints the site -
+the URLs and titles a deterministic crawl finds, sorted, with no model involved. That comparison is
+why the crawler was made reproducible first.
+
+**Cheapest first.** A site's sitemap costs one request and settles most checks, because it shows the
+thing an llms.txt cares about most: pages appearing and disappearing. Only if that moved do we crawl
+and fingerprint, still without a model. Only a site whose structure really changed is rewritten,
+which is the only step that costs anything.
+
+**Attention follows behaviour.** Each site carries its own interval, halved when it changes and
+grown by half when it does not, bounded between an hour and a week. From a day, a busy site reaches
+hourly in five checks and a quiet one weekly in five.
+
+**A run is bounded by time and expense, not by a count of sites.** Twenty checks, at most two
+rewrites, and a 45-second deadline - with a rewrite only begun when 35 seconds remain, because one
+takes about thirty and the deadline cannot interrupt work already started. The first live run took 69
+seconds and would have been killed mid-write by the function limit.
+
+Three states record nothing at all, each for the same reason: a check that reached no verdict must
+not look like a quiet site.
+
+- **deferred** - the run was out of budget. Nothing is written, not even the timestamp, so the row
+  keeps its place at the front of the queue and the next run takes it up. Writing the timestamp would
+  make a change we had just found wait a full interval.
+- **skipped** - blocked, not HTML, or a crawl cut short. The previous fingerprints stay, so a site
+  that recovers is compared against what it looked like before.
+- **baseline** - a row stored before it had a fingerprint. Recording the first one is not a change,
+  and treating it as one would have every existing site watched twice as closely for having been
+  here longest.
+
 ## Accounts
 
 The generator is open to everyone. An account is only required for the LLM features, which cost

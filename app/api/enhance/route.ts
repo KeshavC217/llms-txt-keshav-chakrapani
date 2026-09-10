@@ -14,6 +14,7 @@ import { authConfigured } from "@/lib/supabase/config";
 import { getUser } from "@/lib/supabase/server";
 import { validateLlmsTxt } from "@/lib/spec";
 import { isFresh, readGeneration, storeConfigured, writeGeneration } from "@/lib/store";
+import { structureHash } from "@/lib/monitor";
 
 /**
  * The model-assisted path: everything /api/generate does, then a guide pass and
@@ -176,7 +177,12 @@ export async function POST(request: Request) {
   // change-detection comparison meaningless.
   const complete = !crawl?.partial;
   const stored =
-    enhanced && complete && issues.length === 0 && storeConfigured() ? await writeGeneration(url, llmsTxt) : false;
+    enhanced && complete && issues.length === 0 && storeConfigured()
+      ? // The structure hash goes in with it: without a baseline, the first
+        // scheduled check has nothing to compare and would call every site
+        // changed exactly once.
+        await writeGeneration(url, llmsTxt, structureHash(extraction))
+      : false;
 
   return NextResponse.json({
     url: page.url,

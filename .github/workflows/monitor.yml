@@ -1,0 +1,43 @@
+name: Monitor
+
+# Sites are re-checked on a schedule so a file does not quietly go stale when
+# the site it describes is reorganised. The endpoint does the deciding; this
+# only wakes it up.
+on:
+  schedule:
+    # Every fifteen minutes. This is not how often a site is checked - each row
+    # carries its own interval, from an hour to a week - it is how quickly a
+    # site that has become due gets picked up, and how fast the queue drains at
+    # five sites a run.
+    #
+    # GitHub runs scheduled workflows on a best-effort basis and delays them
+    # under load, so treat the cadence as an upper bound. It also disables
+    # schedules on repositories with no activity for 60 days.
+    - cron: "*/15 * * * *"
+  # Available by hand, which is how it gets tested without waiting six hours.
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask the deployment to re-check what is due
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "APP_URL and CRON_SECRET must be set as repository secrets."
+            exit 1
+          fi
+
+          # --fail-with-body so a non-2xx ends the job loudly rather than
+          # leaving a silent failure to be noticed weeks later.
+          curl --fail-with-body --silent --show-error --max-time 120 \
+            -X POST "$APP_URL/api/refresh" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            | tee response.json
+
+          echo
+          echo "checked: $(python3 -c "import json;print(len(json.load(open('response.json'))['checked']))")"

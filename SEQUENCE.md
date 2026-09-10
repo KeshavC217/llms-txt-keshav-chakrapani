@@ -15,3 +15,4 @@
 14. Stored AI-assisted generations globally in Supabase behind the secret key — the enhance endpoint serves a fresh one without touching the site or the models (28.8s to 0.6s), and degrades to plain generation when the table or key is absent.
 15. Added a crawler — the site's own llms.txt when it publishes one, otherwise sitemap and link discovery paced by what the site tolerates, honouring robots.txt, with each page's own title and description replacing names guessed from slugs.
 16. Made the crawl deterministic — pages are planned before any fetch and results sorted back into plan order, so the same site yields byte-identical output and a content hash can mean the site changed rather than that a packet was slow.
+17. Added the updater — a scheduled re-check that compares a model-free fingerprint of the site, escalating from sitemap to crawl to regeneration only as far as needed, with each site's interval following how often it actually changes.
