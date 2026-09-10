@@ -584,7 +584,7 @@ wrong and there is no account for them to sign in to.
 ## Tests
 
 ```bash
-npm test          # 139 tests, node --test, no framework and no dependencies
+npm test          # 159 tests, node --test, no framework and no dependencies
 npm run lint
 npm run typecheck
 ```
@@ -604,10 +604,25 @@ site with a sidebar and cards, a marketing site reaching one page by four URLs, 
 shell, locale-prefixed paths, a chrome-heavy page, and deliberately malformed markup. Several encode
 a specific bug found against live sites, so a regression has somewhere to fail loudly.
 
-**What is not covered:** every test is on library code. No test exercises an API route, so the auth
-gate, the published-file short circuit and the refresh budget arithmetic have been verified by hand
-against the deployment rather than automatically - which is exactly the checking that should stop
-being manual first.
+**The routes are tested as functions.** `tests/routes.test.ts` calls each handler with a `Request`
+and stubs the two things a unit test must not reach - the network and the store - so what is
+asserted is the handler's own decisions: the gate refusing a signed-out caller *before* the fetch
+(a stub that throws on any request is what proves the order), a stored file served without
+crawling, `regenerate` skipping it, a site's own llms.txt saved as theirs rather than as ours, and
+`/api/refresh` answering 401 to a token of the wrong length rather than letting `timingSafeEqual`
+throw.
+
+Two things had to give way for that. `lib/monitor.ts` gained `RunBudget`, which was arithmetic
+closed over two mutable counters inside the refresh loop - the one part of monitoring most worth
+testing and the one part that could not be. And `tests/setup.mjs` registers a resolve hook, because
+route handlers import through the `@/` alias (a tsconfig `paths` entry Next resolves at build time
+and Node knows nothing about) and import `next/server` (a package with no `exports` map, so Node
+will not guess the `.js`). Both are resolution problems rather than behaviour, so they are fixed in
+the runner rather than by contorting the routes to suit it.
+
+The tests were checked by breaking the code: moving the auth gate after the fetch, ignoring
+`regenerate`, mislabelling a published file as generated, and removing the length guard before
+`timingSafeEqual` each fail exactly one test.
 
 Writing them found five real defects: `<p>` inside a `<div>` closed the `<div>` (the implicit-close
 table was keyed backwards), `stem("guides")` did not match `stem("guide")`, `stripBrandSuffix` left

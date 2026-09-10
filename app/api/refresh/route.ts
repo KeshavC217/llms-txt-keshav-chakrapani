@@ -9,7 +9,7 @@ import { fetchRobots } from "@/lib/crawl/robots";
 import { generate } from "@/lib/generate";
 import { extract } from "@/lib/naiveExtractor";
 import { generationsToCheck, hashContent, recordCheck, storeConfigured } from "@/lib/store";
-import { isDue, nextInterval, sitemapHash, structureHash } from "@/lib/monitor";
+import { RunBudget, intervalAfter, isDue, sitemapHash, structureHash } from "@/lib/monitor";
 
 /**
  * Re-checks stored sites and updates the ones that have moved.
@@ -89,44 +89,37 @@ export async function POST(request: Request) {
   const checked: Record<string, string>[] = [];
   const queue = due.slice(0, MAX_CHECKS);
   let next = 0;
-  let regenerations = 0;
+  const budget = new RunBudget({
+    maxRegenerations: MAX_REGENERATIONS,
+    deadlineMs: DEADLINE_MS,
+    regenerationMs: REGENERATION_MS,
+    startedAt: started,
+  });
 
   async function worker() {
     while (next < queue.length) {
-      if (Date.now() - started > DEADLINE_MS) return;
+      if (budget.expired()) return;
 
       const row = queue[next++];
       try {
-        /*
-         * Both budgets are read and claimed here, before the await, so two
-         * workers cannot each see the last slot and take it. Claiming up front
-         * can waste a slot if the check turns out not to need it, which is the
-         * cheaper mistake: the alternative is three rewrites in a run built to
-         * afford two.
-         */
-        const timeLeft = DEADLINE_MS - (Date.now() - started);
-        const mayRegenerate = regenerations < MAX_REGENERATIONS && timeLeft > REGENERATION_MS;
-        if (mayRegenerate) regenerations += 1;
+        const mayRegenerate = budget.claim();
 
-          const outcome =
-        row.source === "published"
-          ? // Their file, so the check is to read it again: crawling would
-            // produce ours, which is not what this row holds.
-            await checkPublished(row.publishedAt ?? row.url, row.contentHash)
-          : await check(row.url, row.structureHash ?? null, row.sitemapHash ?? null, mayRegenerate);
+        const outcome =
+          row.source === "published"
+            ? // Their file, so the check is to read it again: crawling would
+              // produce ours, which is not what this row holds.
+              await checkPublished(row.publishedAt ?? row.url, row.contentHash)
+            : await check(row.url, row.structureHash ?? null, row.sitemapHash ?? null, mayRegenerate);
 
         // Hand back a claim the check did not use.
-        if (mayRegenerate && outcome.result !== "changed") regenerations -= 1;
+        if (mayRegenerate && outcome.result !== "changed") budget.release();
 
         if (outcome.result === "deferred") {
           checked.push({ url: row.url, result: outcome.result, next: "next run" });
           continue;
         }
 
-        const inconclusive = outcome.result === "skipped" || outcome.result === "baseline";
-        const interval = inconclusive
-          ? (row.checkIntervalHours ?? 24)
-          : nextInterval(row.checkIntervalHours ?? 24, outcome.changed);
+        const interval = intervalAfter(row.checkIntervalHours ?? 24, outcome);
 
         await recordCheck(row.url, {
           structureHash: outcome.structureHash ?? row.structureHash ?? "",
