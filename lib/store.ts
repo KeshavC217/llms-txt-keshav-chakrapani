@@ -252,6 +252,16 @@ export async function writeGeneration(url: string, llmsTxt: string, options: Wri
     structure_hash: options.structureHash ?? null,
     source: options.source ?? "generated",
     published_at: options.publishedAt ?? null,
+    /*
+     * Generating a site is looking at it, so this counts as its first check.
+     *
+     * Without it a new row has no last_checked_at, isDue reads never-checked
+     * as due, and the next scheduled run spends a check asking whether the
+     * site has changed since we built it minutes ago. Cheap when the site has
+     * a sitemap and not cheap at all when it does not, since that falls
+     * through to a full crawl.
+     */
+    last_checked_at: row.generated_at,
   });
 
   return !error;

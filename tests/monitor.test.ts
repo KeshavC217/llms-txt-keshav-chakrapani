@@ -154,3 +154,14 @@ test("a conclusive check moves the interval", () => {
   assert.equal(intervalAfter(24, { result: "unchanged", changed: false }), 36);
   assert.equal(intervalAfter(24, { result: "unchanged-sitemap", changed: false }), 36);
 });
+
+test("a site just generated is not immediately due for a check", () => {
+  // writeGeneration records the moment as the row's first check, because
+  // generating a site is looking at it. Without that the next scheduled run
+  // spends a check asking whether the site changed since we built it.
+  const now = Date.parse("2026-09-10T12:00:00Z");
+
+  assert.equal(isDue(new Date(now - 1_000).toISOString(), 24, now), false);
+  // A row that genuinely has never been checked still is.
+  assert.equal(isDue(null, 24, now), true);
+});
