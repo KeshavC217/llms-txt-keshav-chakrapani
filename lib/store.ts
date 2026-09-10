@@ -22,11 +22,12 @@ import { SUPABASE_URL } from "./supabase/config.ts";
  * this table holds no user column at all, and anything about a person - history,
  * which sites they track - belongs in its own table under RLS when it exists.
  *
- * Only AI-assisted results are written. That is the expensive path and the one
- * behind an account, so caching it saves something real. The deterministic file
- * is free and fast from /api/generate, so a row holding one would save nothing;
- * worse, a public endpoint that writes to durable storage is an invitation to
- * fill it with junk, and requiring an account closes that.
+ * Everything a signed-in person generates is written, without conditions. An
+ * earlier version weighed four of them - was the crawl complete, did the models
+ * help, does it conform, is a store configured - and the result was that a file
+ * could quietly fail to be kept for reasons nobody could see from the outside.
+ * Generating requires an account, which is what keeps the table from filling
+ * with junk, so nothing further needs guarding.
  *
  * The key is the URL alone, and stays that way only because every crawl uses
  * the same page ceiling. Anything that makes the output depend on a request
@@ -54,8 +55,23 @@ import { SUPABASE_URL } from "./supabase/config.ts";
 
 const TABLE = "generations";
 
-const SELECT_COLUMNS =
-  "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, change_count, check_interval_hours, sitemap_hash";
+/*
+ * Two column lists, because a migration and a deploy arrive by different hands.
+ *
+ * Selecting a column the table does not have is an error, not an omission, so a
+ * read asking for everything returns nothing at all - which emptied the saved
+ * list entirely the first time this was tried before the migration had run.
+ * Each read asks for the full set, and falls back to what has always existed.
+ */
+const BASE_COLUMNS = "url, llms_txt, content_hash, generated_at";
+const SELECT_COLUMNS = `${BASE_COLUMNS}, structure_hash, last_checked_at, changed_at, change_count, check_interval_hours, sitemap_hash, source, published_at`;
+
+const BASE_SUMMARY = "url, generated_at";
+const SUMMARY_COLUMNS = `${BASE_SUMMARY}, changed_at, source`;
+
+/** True when a query failed only because the schema is older than the code. */
+const isMissingColumn = (error: { code?: string } | null) =>
+  error?.code === "PGRST204" || error?.code === "42703";
 
 /** How long a stored file is served before it is generated afresh. */
 const MAX_AGE_MS = Number(process.env.GENERATION_MAX_AGE_MS ?? 24 * 60 * 60 * 1000);
@@ -72,6 +88,10 @@ export interface StoredGeneration {
   changeCount?: number;
   checkIntervalHours?: number;
   sitemapHash?: string | null;
+  /** "generated" - we crawled and wrote it. "published" - the site's own file. */
+  source?: string;
+  /** For a published file, where it lives, so it can be re-read. */
+  publishedAt?: string | null;
 }
 
 export const storeConfigured = () => Boolean(SUPABASE_URL && process.env.SUPABASE_SECRET_KEY);
@@ -101,14 +121,13 @@ export async function readGeneration(url: string): Promise<StoredGeneration | nu
   const supabase = client();
   if (!supabase) return null;
 
-  const { data, error } = await supabase
-    .from(TABLE)
-    .select(SELECT_COLUMNS)
-    .eq("url", url)
-    .maybeSingle();
+  const attempt = await supabase.from(TABLE).select(SELECT_COLUMNS).eq("url", url).maybeSingle();
+  const { data, error } = isMissingColumn(attempt.error)
+    ? await supabase.from(TABLE).select(BASE_COLUMNS).eq("url", url).maybeSingle()
+    : attempt;
 
-  // A missing table, a revoked key, an unreachable database: all mean "no
-  // cached answer", which is a state this already handles.
+  // A missing table, a revoked key, an unreachable database: all mean "nothing
+  // saved", which is a state this already handles.
   if (error || !data) return null;
 
   return fromRow(data);
@@ -127,9 +146,43 @@ function fromRow(row: any): StoredGeneration {
     changeCount: row.change_count ?? 0,
     checkIntervalHours: row.check_interval_hours ?? 24,
     sitemapHash: row.sitemap_hash,
+    source: row.source ?? "generated",
+    publishedAt: row.published_at,
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
+
+/** Everything saved, newest first. Readable by anyone: these describe public pages. */
+export interface SavedSummary {
+  url: string;
+  generatedAt: string;
+  changedAt?: string | null;
+  source: string;
+}
+
+export async function listGenerations(limit = 100): Promise<SavedSummary[]> {
+  const supabase = client();
+  if (!supabase) return [];
+
+  const query = (columns: string) =>
+    supabase.from(TABLE).select(columns).order("generated_at", { ascending: false }).limit(limit);
+
+  const attempt = await query(SUMMARY_COLUMNS);
+  const { data, error } = isMissingColumn(attempt.error) ? await query(BASE_SUMMARY) : attempt;
+
+  // The column list is chosen at runtime, so the client cannot infer a row
+  // type for it; the shape is asserted here the same way fromRow does.
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  return error || !data
+    ? []
+    : (data as any[]).map((row) => ({
+        url: row.url,
+        generatedAt: row.generated_at,
+        changedAt: row.changed_at ?? null,
+        source: row.source ?? "generated",
+      }));
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+}
 
 /**
  * The rows a scheduled check should look at, least recently checked first, so
@@ -139,13 +192,13 @@ export async function generationsToCheck(limit: number): Promise<StoredGeneratio
   const supabase = client();
   if (!supabase) return [];
 
-  const { data, error } = await supabase
-    .from(TABLE)
-    .select(SELECT_COLUMNS)
-    .order("last_checked_at", { ascending: true, nullsFirst: true })
-    .limit(limit);
+  const query = (columns: string) =>
+    supabase.from(TABLE).select(columns).order("last_checked_at", { ascending: true, nullsFirst: true }).limit(limit);
 
-  return error || !data ? [] : data.map(fromRow);
+  const attempt = await query(SELECT_COLUMNS);
+  // Before the monitoring columns exist there is nothing to schedule, so an
+  // empty list is the honest answer rather than a fallback.
+  return attempt.error || !attempt.data ? [] : attempt.data.map(fromRow);
 }
 
 /**
@@ -189,7 +242,14 @@ export async function recordCheck(
  * Writes the generated file, replacing any previous one for the same URL.
  * Returns whether it was stored, which the caller reports rather than assumes.
  */
-export async function writeGeneration(url: string, llmsTxt: string, structureHash?: string): Promise<boolean> {
+export interface WriteOptions {
+  structureHash?: string;
+  /** "published" when this is the site's own file rather than one we built. */
+  source?: "generated" | "published";
+  publishedAt?: string;
+}
+
+export async function writeGeneration(url: string, llmsTxt: string, options: WriteOptions = {}): Promise<boolean> {
   const supabase = client();
   if (!supabase) return false;
 
@@ -200,7 +260,12 @@ export async function writeGeneration(url: string, llmsTxt: string, structureHas
     generated_at: new Date().toISOString(),
   };
 
-  const { error } = await supabase.from(TABLE).upsert({ ...row, structure_hash: structureHash ?? null });
+  const { error } = await supabase.from(TABLE).upsert({
+    ...row,
+    structure_hash: options.structureHash ?? null,
+    source: options.source ?? "generated",
+    published_at: options.publishedAt ?? null,
+  });
   if (!error) return true;
 
   /*

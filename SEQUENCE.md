@@ -18,3 +18,5 @@
 17. Added the updater — a scheduled re-check that compares a model-free fingerprint of the site, escalating from sitemap to crawl to regeneration only as far as needed, with each site's interval following how often it actually changes.
 18. Raised monitoring throughput — sites are checked four at a time rather than one, which took thirteen checks from 46 seconds to 11, and the schedule moved to every five minutes offset off the hour, where GitHub says load is highest.
 19. Moved the queue loop into the GitHub runner, which has six hours where a function has sixty seconds, while leaving the crawling on the deployment so no credentials reach CI and requests keep the app's own address rather than a shared one.
+20. Simplified the model — one endpoint that always crawls, always runs the models and always saves, generating behind an account while reading stays open to anyone, and the AI toggle and the four conditions on saving are gone.
+21. Saved the site's own llms.txt too, labelled as theirs rather than ours, and taught the scheduled check to re-read a published file instead of crawling and replacing their curation with our generated version.

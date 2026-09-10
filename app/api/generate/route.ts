@@ -1,22 +1,33 @@
 import { NextResponse } from "next/server";
 
-import { extract, linkCount, render } from "@/lib/naiveExtractor";
-import { generate } from "@/lib/generate";
-import { findPublished } from "@/lib/published";
-import { USER_AGENT } from "@/lib/fetchPage";
-import { fetchPage, normalizeUrl } from "@/lib/fetchPage";
+import { checkGenerateAccess } from "@/lib/authGate";
 import { classifyEmpty, explain } from "@/lib/blocks";
+import { enhance } from "@/lib/ai/enhance";
+import { extract, linkCount } from "@/lib/naiveExtractor";
+import { fetchPage, normalizeUrl, USER_AGENT } from "@/lib/fetchPage";
+import { findPublished } from "@/lib/published";
+import { generate } from "@/lib/generate";
 import { renderConfigured, renderPage } from "@/lib/render";
+import { structureHash } from "@/lib/monitor";
+import { authConfigured } from "@/lib/supabase/config";
+import { getUser } from "@/lib/supabase/server";
+import { readGeneration, storeConfigured, writeGeneration } from "@/lib/store";
 import { validateLlmsTxt } from "@/lib/spec";
 
 /**
- * Builds an llms.txt from one fetched page, following TEMPLATE.txt. Open to
- * everyone and entirely deterministic; the model-assisted path is a separate
- * endpoint at /api/enhance, because it needs an account and a longer deadline.
+ * Generating an llms.txt: crawl the site, run the models over what was found,
+ * save the result.
+ *
+ * One endpoint rather than two. There used to be a free deterministic path and
+ * a gated model-assisted one, which meant two routes doing the same work up to
+ * the last step, two answers for the same URL, and an option in the interface
+ * asking people to choose between them. Generating always uses the models now,
+ * always requires an account, and always saves what it produced.
+ *
+ * Reading what has been saved needs no account; see /api/saved.
  */
 
-// A crawl of up to 150 pages, paced, plus the render. Comfortably inside this,
-// but not inside the default.
+// A crawl and two model passes.
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
@@ -32,6 +43,32 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Please enter a valid URL." }, { status: 400 });
   }
 
+  // Checked before the fetch: refusing after fifteen seconds spent on someone
+  // else's server would waste their bandwidth to tell us nothing.
+  const access = checkGenerateAccess({ signedIn: Boolean(await getUser()), authConfigured });
+  if (!access.allowed) {
+    return NextResponse.json({ error: access.error }, { status: access.status });
+  }
+
+  // A saved file is the answer unless a fresh one was asked for. It is not a
+  // cache with an expiry: it is what this site's llms.txt is, until something
+  // changes it - either a person asking again, or the scheduled check noticing
+  // the site moved.
+  if (storeConfigured() && body.regenerate !== true) {
+    const saved = await readGeneration(url);
+    if (saved) {
+      return NextResponse.json({
+        url: saved.url,
+        llmsTxt: saved.llmsTxt,
+        saved: true,
+        source: saved.source,
+        publishedAt: saved.publishedAt,
+        generatedAt: saved.generatedAt,
+        spec: { valid: validateLlmsTxt(saved.llmsTxt).length === 0, issues: [] },
+      });
+    }
+  }
+
   let page;
   try {
     page = await fetchPage(url);
@@ -43,7 +80,7 @@ export async function POST(request: Request) {
   }
 
   // A challenge page parses perfectly well and describes nothing but the
-  // challenge, so it must not be turned into an llms.txt. Say what happened.
+  // challenge, so it must not be turned into an llms.txt.
   if (page.block) {
     const rendered = page.block.kind === "bot-challenge" && renderConfigured() ? await renderPage(page.url) : null;
 
@@ -57,42 +94,38 @@ export async function POST(request: Request) {
   }
 
   if (!page.isHtml) {
-    return NextResponse.json({
-      url: page.url,
-      status: page.status,
-      contentType: page.contentType,
-      truncated: page.truncated,
-      llmsTxt: page.body,
-    });
+    return NextResponse.json({ error: "That URL is not an HTML page, so there is nothing to read." }, { status: 415 });
   }
 
-  // If the site publishes its own, that is the answer: someone chose what
-  // belonged in it, and one request settles it instead of fifty.
   const seed = extract(page.body, page.url);
 
+  // If the site publishes its own, that is the answer: someone chose what
+  // belonged in it. Saved like anything else, but marked as theirs - so the
+  // list says which files this project wrote and which it merely found, and so
+  // the scheduled check knows to re-read their file rather than crawl.
   if (body.regenerate !== true) {
     const published = await findPublished(page.url, USER_AGENT, seed.existingLlmsTxt);
     if (published) {
+      const kept = storeConfigured()
+        ? await writeGeneration(url, published.llmsTxt, { source: "published", publishedAt: published.url })
+        : false;
+
       return NextResponse.json({
         url: page.url,
-        status: page.status,
-        contentType: page.contentType,
-        truncated: false,
         llmsTxt: published.llmsTxt,
         source: "published",
         publishedAt: published.url,
+        stored: kept,
         spec: { valid: published.conforms, issues: [] },
       });
     }
   }
 
-  const { extraction: crawled, crawl } = await generate(page.body, page.url, { seed });
-  let extraction = crawled;
+  const generated = await generate(page.body, page.url, { seed });
+  let extraction = generated.extraction;
 
-  // A shell with no links is the other case a browser fixes: nothing refused
-  // us, the page simply had not built itself yet.
-  // Nothing extracted is worth a second look: some sites serve a challenge with
-  // a 200, which the status check above cannot see.
+  // Nothing extracted is worth a second look: some sites serve a challenge
+  // with a 200, which the status check above cannot see.
   if (linkCount(extraction) === 0) {
     const late = classifyEmpty(page.body);
     if (late) {
@@ -107,31 +140,24 @@ export async function POST(request: Request) {
     }
   }
 
-  if (extraction.clientRendered && renderConfigured()) {
-    const rendered = await renderPage(page.url);
-    if (rendered) {
-      // Adopted only if it actually found more than the plain response did.
-      // "Longer HTML" is not the test - a renderer can return a bigger page
-      // that still has nothing on it.
-      const better = extract(rendered.html, page.url);
-      if (linkCount(better) > linkCount(extraction)) extraction = better;
-    }
-  }
-
-  const llmsTxt = render(extraction, page.url);
+  const { llmsTxt, report } = await enhance(extraction, page.url);
   const issues = validateLlmsTxt(llmsTxt);
+
+  // Saved without conditions. Generating needs an account, which is what keeps
+  // this table honest; nothing else has to be weighed.
+  const stored = storeConfigured()
+    ? await writeGeneration(url, llmsTxt, { structureHash: structureHash(extraction), source: "generated" })
+    : false;
 
   return NextResponse.json({
     url: page.url,
-    status: page.status,
-    contentType: page.contentType,
-    truncated: page.truncated,
     llmsTxt,
-    // Checked on the way out rather than asserted in a comment: the file we
-    // just built is parsed back against the grammar at llmstxt.org.
+    saved: false,
+    stored,
+    crawl: generated.crawl,
+    report,
     spec: { valid: issues.length === 0, issues },
     markdownAlternate: extraction.markdownAlternate,
     existingLlmsTxt: extraction.existingLlmsTxt,
-    crawl,
   });
 }

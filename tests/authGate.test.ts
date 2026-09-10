@@ -1,24 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checkLlmAccess } from "../lib/authGate.ts";
+import { checkGenerateAccess } from "../lib/authGate.ts";
 
-const gate = (overrides: Partial<Parameters<typeof checkLlmAccess>[0]> = {}) =>
-  checkLlmAccess({ enhanceRequested: true, signedIn: false, authConfigured: true, ...overrides });
+const gate = (overrides: Partial<Parameters<typeof checkGenerateAccess>[0]> = {}) =>
+  checkGenerateAccess({ signedIn: false, authConfigured: true, ...overrides });
 
-test("the generator itself is open to everyone", () => {
-  // No account, no auth configured, still allowed: only the LLM pass is gated.
-  assert.equal(gate({ enhanceRequested: false, signedIn: false, authConfigured: false }).allowed, true);
-});
-
-test("the AI features need an account", () => {
+test("generating needs an account", () => {
   const result = gate({ signedIn: false });
   assert.equal(result.allowed, false);
   assert.equal(result.status, 401);
   assert.match(result.error ?? "", /sign in/i);
 });
 
-test("a signed-in user may use the AI features", () => {
+test("a signed-in person may generate", () => {
   assert.equal(gate({ signedIn: true }).allowed, true);
 });
 

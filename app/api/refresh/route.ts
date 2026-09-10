@@ -3,13 +3,13 @@ import { NextResponse } from "next/server";
 
 import { enhance } from "@/lib/ai/enhance";
 import { fetchPage, USER_AGENT } from "@/lib/fetchPage";
+import { findPublished } from "@/lib/published";
 import { fetchSitemap, sitemapCandidates } from "@/lib/crawl/sitemap";
 import { fetchRobots } from "@/lib/crawl/robots";
 import { generate } from "@/lib/generate";
 import { extract } from "@/lib/naiveExtractor";
-import { generationsToCheck, recordCheck, storeConfigured } from "@/lib/store";
+import { generationsToCheck, hashContent, recordCheck, storeConfigured } from "@/lib/store";
 import { isDue, nextInterval, sitemapHash, structureHash } from "@/lib/monitor";
-import { validateLlmsTxt } from "@/lib/spec";
 
 /**
  * Re-checks stored sites and updates the ones that have moved.
@@ -108,7 +108,12 @@ export async function POST(request: Request) {
         const mayRegenerate = regenerations < MAX_REGENERATIONS && timeLeft > REGENERATION_MS;
         if (mayRegenerate) regenerations += 1;
 
-        const outcome = await check(row.url, row.structureHash ?? null, row.sitemapHash ?? null, mayRegenerate);
+          const outcome =
+        row.source === "published"
+          ? // Their file, so the check is to read it again: crawling would
+            // produce ours, which is not what this row holds.
+            await checkPublished(row.publishedAt ?? row.url, row.contentHash)
+          : await check(row.url, row.structureHash ?? null, row.sitemapHash ?? null, mayRegenerate);
 
         // Hand back a claim the check did not use.
         if (mayRegenerate && outcome.result !== "changed") regenerations -= 1;
@@ -143,6 +148,21 @@ export async function POST(request: Request) {
   await Promise.all(Array.from({ length: Math.min(CHECK_CONCURRENCY, queue.length || 1) }, worker));
 
   return NextResponse.json({ checked, considered: due.length, ms: Date.now() - started });
+}
+
+/**
+ * A row holding a site's own llms.txt is checked by re-reading it.
+ *
+ * One request, no crawl, and no model: if their file changed we keep the new
+ * one, and if it has gone we leave what we have rather than silently replacing
+ * their curation with our generated guess.
+ */
+async function checkPublished(publishedUrl: string, knownContent: string): Promise<Outcome> {
+  const found = await findPublished(publishedUrl, USER_AGENT);
+  if (!found) return { result: "skipped", changed: false };
+
+  if (hashContent(found.llmsTxt) === knownContent) return { result: "unchanged", changed: false };
+  return { result: "changed", changed: true, llmsTxt: found.llmsTxt };
 }
 
 interface Outcome {
@@ -223,14 +243,9 @@ async function check(
    */
   if (!mayRegenerate) return { result: "deferred", changed: false };
 
-  const { llmsTxt, enhanced } = await enhance(extraction, page.url);
-  const conforms = validateLlmsTxt(llmsTxt).length === 0;
+  const { llmsTxt } = await enhance(extraction, page.url);
 
-  return {
-    result: "changed",
-    changed: true,
-    structureHash: current,
-    sitemapHash: currentSitemap,
-    llmsTxt: enhanced && conforms ? llmsTxt : undefined,
-  };
+  // Written without conditions, as everywhere else: the site changed, so the
+  // file it had is out of date whatever the models made of the new one.
+  return { result: "changed", changed: true, structureHash: current, sitemapHash: currentSitemap, llmsTxt };
 }
