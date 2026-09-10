@@ -9,7 +9,6 @@ import { generate } from "@/lib/generate";
 import { extract } from "@/lib/naiveExtractor";
 import { generationsToCheck, recordCheck, storeConfigured } from "@/lib/store";
 import { isDue, nextInterval, sitemapHash, structureHash } from "@/lib/monitor";
-import { validateLlmsTxt } from "@/lib/spec";
 
 /**
  * Re-checks stored sites and updates the ones that have moved.
@@ -223,14 +222,9 @@ async function check(
    */
   if (!mayRegenerate) return { result: "deferred", changed: false };
 
-  const { llmsTxt, enhanced } = await enhance(extraction, page.url);
-  const conforms = validateLlmsTxt(llmsTxt).length === 0;
+  const { llmsTxt } = await enhance(extraction, page.url);
 
-  return {
-    result: "changed",
-    changed: true,
-    structureHash: current,
-    sitemapHash: currentSitemap,
-    llmsTxt: enhanced && conforms ? llmsTxt : undefined,
-  };
+  // Written without conditions, as everywhere else: the site changed, so the
+  // file it had is out of date whatever the models made of the new one.
+  return { result: "changed", changed: true, structureHash: current, sitemapHash: currentSitemap, llmsTxt };
 }

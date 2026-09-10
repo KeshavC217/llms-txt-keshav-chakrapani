@@ -401,22 +401,24 @@ file for the same reference, keeping whichever separated them furthest:
 sections 9 out of 15. `qwen3.7-flash` and `ling-3.0-flash` returned nothing at all - both are
 reasoning models that spend the entire token budget thinking and answer with empty content.
 
-## What gets stored
+## Generating and reading
 
-AI-assisted results are kept; nothing else is. `/api/enhance` looks in the store before fetching, so
-a hit costs neither a request to the site nor a model call: react.dev takes 28.8s to generate and
-0.6s to serve again, byte for byte identical.
+**Generating requires an account.** It crawls someone else's site and spends money on models, so it
+is not something to leave open to the internet. `POST /api/generate` is the only way to make a file,
+and it always crawls, always runs the models, and always saves what it produced.
 
-**Globally, not per user.** The file is derived entirely from public pages, so two people asking
-about the same site should get the same answer, and crawling it twice to produce identical output is
-how a tool earns a site's 429s.
+**Reading needs no account.** `GET /api/saved` lists what has been generated; `GET /api/saved?url=...`
+returns one file. Those files describe public pages and were built from public pages, so there is
+nothing in them to protect. The home page shows the list to anyone.
 
-**Only the AI-assisted path writes.** It is the expensive one and the one behind an account. The
-deterministic file is free and fast from `/api/generate`, so storing it would fill the table with
-rows that save nothing - and a public endpoint that writes to durable storage is an invitation to
-fill it with junk.
+**Saving has no conditions.** If a signed-in person generates a site, the result is kept. An earlier
+version weighed four of them - was the crawl complete, did the models help, does it conform, is a
+store configured - and the effect was that a file could quietly fail to be kept for reasons nobody
+could see from outside. Requiring an account is what keeps the table honest; nothing else needs
+guarding.
 
-Only a result the models actually improved, and which still conforms to the spec, is written.
+It is not a cache and has no expiry. A saved file is what that site's llms.txt *is*, until something
+replaces it: a person asking for a fresh one, or the scheduled check noticing the site moved.
 
 ```sql
 create table public.generations (
@@ -432,82 +434,13 @@ create index generations_generated_at_idx on public.generations (generated_at);
 
 RLS is enabled with **no policies at all**, so the publishable key can neither read nor write:
 verified against the live project, a browser-key read returns zero rows and a browser-key insert is
-refused with *"new row violates row-level security policy"*. The store uses `SUPABASE_SECRET_KEY`,
-which bypasses RLS and never leaves the server - the first thing in this project to need it.
+refused with *"new row violates row-level security policy"*. Everything goes through the server using
+`SUPABASE_SECRET_KEY`, which bypasses RLS and never leaves it.
 
-`content_hash` is written now although nothing reads it yet: it is what change detection will
-compare, and adding the column later would mean a migration.
-
-Freshness defaults to 24 hours, overridable with `GENERATION_MAX_AGE_MS`.
-
-Storage is an optimisation, not a dependency. A missing table, a revoked key or an unreachable
-database all mean "no cached answer", which is a state the endpoint already handles - verified by
-running against the live project before the table existed.
-
-## Keeping files current
-
-A site reorganises its documentation and the file we generated for it quietly becomes wrong.
-`POST /api/refresh`, called every fifteen minutes by `.github/workflows/monitor.yml`, re-checks
-stored sites and rewrites the ones that moved.
-
-**Two hashes, and the difference between them is the design.** `content_hash` fingerprints the file
-we serve, which is AI-assisted: models are asked at temperature zero but not promised to be
-identical, so a change there proves nothing about the site. `structure_hash` fingerprints the site -
-the URLs and titles a deterministic crawl finds, sorted, with no model involved. That comparison is
-why the crawler was made reproducible first.
-
-**Cheapest first.** A site's sitemap costs one request and settles most checks, because it shows the
-thing an llms.txt cares about most: pages appearing and disappearing. Only if that moved do we crawl
-and fingerprint, still without a model. Only a site whose structure really changed is rewritten,
-which is the only step that costs anything.
-
-**Attention follows behaviour.** Each site carries its own interval, halved when it changes and
-grown by half when it does not, bounded between an hour and a week. From a day, a busy site reaches
-hourly in five checks and a quiet one weekly in five.
-
-**A run is bounded by time and expense, not by a count of sites.** Forty checks, at most two
-rewrites, and a 45-second deadline - with a rewrite only begun when 35 seconds remain, because one
-takes about thirty and the deadline cannot interrupt work already started. The first live run took 69
-seconds and would have been killed mid-write by the function limit, which on this plan is 60 seconds
-and not negotiable.
-
-Sites are checked four at a time. They are independent, so sequential checking bought nothing and
-cost capacity: five crawls used to fill the whole budget, where thirteen sites now take 11.2 seconds
-of it. The schedule runs every five minutes - GitHub's shortest interval - offset off the hour,
-because GitHub documents that scheduled events are delayed under load and that "high load times
-include the start of every hour".
-
-The loop over the queue lives in the workflow rather than inside the function. A serverless function
-on this plan is killed at 60 seconds, so one call can only ever take a slice of the queue; the runner
-has six hours, and calls the endpoint until it reports nothing due. That removes the ceiling from the
-batch while each individual call stays comfortably inside it.
-
-The crawling itself stays on the deployment on purpose. That is where the code and the credentials
-already are, so nothing is duplicated into CI - and requests from a shared CI address are far more
-likely to be met with an anti-bot challenge than requests from the app's own host, which is a
-failure mode this project has already measured at length.
-
-What binds first at real scale is rewrites: two a run, because a rewrite takes about thirty seconds
-of a sixty-second ceiling.
-
-Three states record nothing at all, each for the same reason: a check that reached no verdict must
-not look like a quiet site.
-
-- **deferred** - the run was out of budget. Nothing is written, not even the timestamp, so the row
-  keeps its place at the front of the queue and the next run takes it up. Writing the timestamp would
-  make a change we had just found wait a full interval.
-- **skipped** - blocked, not HTML, or a crawl cut short. The previous fingerprints stay, so a site
-  that recovers is compared against what it looked like before.
-- **baseline** - a row stored before it had a fingerprint. Recording the first one is not a change,
-  and treating it as one would have every existing site watched twice as closely for having been
-  here longest.
+A site that publishes its own llms.txt gets that returned instead, and it is **not** saved: it is
+already published at its own address, and one request fetches it again.
 
 ## Accounts
-
-The generator is open to everyone. An account is only required for the LLM features, which cost
-money per call and need an identity to attribute that to. `lib/authGate.ts` holds that rule as a
-pure function, checked before the fetch rather than after - refusing once we have already spent
-fifteen seconds on someone else's server wastes their bandwidth to tell us nothing.
 
 Sign-in is email and password, through Supabase. Two details differ from every Supabase guide you
 will find, because this is Next 16:
@@ -517,12 +450,13 @@ will find, because this is Next 16:
 - `cookies()` is **async**, so the server client is async too.
 
 The session is verified with `getUser()` rather than read from `getSession()`. getSession trusts the
-cookie; getUser checks the token with Supabase. For deciding whether to spend money on an LLM call,
-the cookie's own claim is not good enough.
+cookie; getUser checks the token with Supabase. For deciding whether to spend money on a crawl and
+two model passes, the cookie's own claim is not good enough - and the difference is not theoretical:
+altering the last six characters of a real token is refused by one and accepted by the other.
 
-With the Supabase variables unset the app still runs: the generator works, and the AI toggle says it
-is not configured rather than offering a sign-in that cannot happen. A request for the LLM path then
-gets 503, not 401 - the caller did nothing wrong and signing in would not help.
+With the Supabase variables unset the app still runs and still reads: the saved list and every saved
+file are served as normal, and generating answers 503 rather than 401, since the caller did nothing
+wrong and there is no account for them to sign in to.
 
 ## Tests
 

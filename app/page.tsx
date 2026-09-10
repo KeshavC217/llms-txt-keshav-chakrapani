@@ -1,12 +1,14 @@
 import Link from "next/link";
 
 import { Generator } from "./Generator";
+import { listGenerations } from "@/lib/store";
 import { signOut } from "./login/actions";
 import { authConfigured } from "@/lib/supabase/config";
 import { getUser } from "@/lib/supabase/server";
 
 export default async function Home() {
-  const user = await getUser();
+  // Both are public reads; only generating is gated.
+  const [user, saved] = await Promise.all([getUser(), listGenerations(50)]);
 
   return (
     <main className="mx-auto w-full max-w-3xl px-6 py-16">
@@ -29,7 +31,7 @@ export default async function Home() {
         </div>
       )}
 
-      <Generator signedIn={Boolean(user)} authConfigured={authConfigured} />
+      <Generator signedIn={Boolean(user)} saved={saved} />
     </main>
   );
 }

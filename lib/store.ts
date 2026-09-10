@@ -22,11 +22,12 @@ import { SUPABASE_URL } from "./supabase/config.ts";
  * this table holds no user column at all, and anything about a person - history,
  * which sites they track - belongs in its own table under RLS when it exists.
  *
- * Only AI-assisted results are written. That is the expensive path and the one
- * behind an account, so caching it saves something real. The deterministic file
- * is free and fast from /api/generate, so a row holding one would save nothing;
- * worse, a public endpoint that writes to durable storage is an invitation to
- * fill it with junk, and requiring an account closes that.
+ * Everything a signed-in person generates is written, without conditions. An
+ * earlier version weighed four of them - was the crawl complete, did the models
+ * help, does it conform, is a store configured - and the result was that a file
+ * could quietly fail to be kept for reasons nobody could see from the outside.
+ * Generating requires an account, which is what keeps the table from filling
+ * with junk, so nothing further needs guarding.
  *
  * The key is the URL alone, and stays that way only because every crawl uses
  * the same page ceiling. Anything that makes the output depend on a request
@@ -130,6 +131,22 @@ function fromRow(row: any): StoredGeneration {
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
+
+/** Everything saved, newest first. Readable by anyone: these describe public pages. */
+export async function listGenerations(limit = 100): Promise<{ url: string; generatedAt: string; changedAt?: string | null }[]> {
+  const supabase = client();
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select("url, generated_at, changed_at")
+    .order("generated_at", { ascending: false })
+    .limit(limit);
+
+  return error || !data
+    ? []
+    : data.map((row) => ({ url: row.url, generatedAt: row.generated_at, changedAt: row.changed_at }));
+}
 
 /**
  * The rows a scheduled check should look at, least recently checked first, so

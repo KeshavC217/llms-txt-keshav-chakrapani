@@ -1,64 +1,98 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 
 interface Result {
   url: string;
-  status: number;
-  contentType: string | null;
-  truncated: boolean;
   llmsTxt: string;
+  /** True when this came from storage rather than from a fresh run. */
+  saved?: boolean;
+  stored?: boolean;
+  generatedAt?: string;
   source?: "published";
   publishedAt?: string;
-  crawl?: { pages: number; planned: number; fetched: number; failed: number; fromSitemap: number; robotsDisallowed: number; partial: boolean };
-  enhanced?: boolean;
-  report?: { notesAccepted: number; notesRejected: number; sectionsRenamed: number; chunksFailed: number; guideModel: string; workerModel: string; reason?: string };
+  crawl?: { pages: number; planned: number; failed: number; partial: boolean };
+  report?: { notesAccepted: number; sectionsRenamed: number; chunksFailed: number; workerModel: string };
   spec?: { valid: boolean; issues: { line: number; message: string }[] };
-  markdownAlternate?: string;
-  existingLlmsTxt?: string;
 }
 
-/** Says what the models actually changed, rather than that they ran. */
+export interface SavedSite {
+  url: string;
+  generatedAt: string;
+  changedAt?: string | null;
+}
+
+/** "3h ago", so a stored file says how old it is. */
+function age(iso: string): string {
+  const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+
+  const hours = Math.round(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}
+
+/** Says what the models changed, rather than that they ran. */
 function describeReport(report: NonNullable<Result["report"]>): string {
   const changes = [
     report.notesAccepted > 0 && `${report.notesAccepted} notes`,
     report.sectionsRenamed > 0 && `${report.sectionsRenamed} sections renamed`,
   ].filter(Boolean);
 
-  if (changes.length === 0) return "AI added nothing";
-
-  // A failed chunk means links that silently kept no note, which is worth
-  // saying: the file is thinner than it looks, and not because the page was.
-  const failed = report.chunksFailed > 0 ? `, ${report.chunksFailed} chunks failed` : "";
-  return `${changes.join(", ")}${failed}`;
+  if (changes.length === 0) return "the models added nothing";
+  return `${changes.join(", ")}${report.chunksFailed > 0 ? `, ${report.chunksFailed} chunks failed` : ""}`;
 }
 
-export function Generator({ signedIn, authConfigured }: { signedIn: boolean; authConfigured: boolean }) {
+export function Generator({ signedIn, saved }: { signedIn: boolean; saved: SavedSite[] }) {
   const [url, setUrl] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [enhance, setEnhance] = useState(false);
-  const [regenerate, setRegenerate] = useState(false);
 
-  async function generate(event: React.FormEvent) {
-    event.preventDefault();
+  /**
+   * `force` is a parameter rather than read from state: setting state and
+   * reading it in the same handler sends the previous value, because React
+   * does not apply the update until the next render.
+   */
+  async function run(target: string, force: boolean) {
+    if (!target.trim()) return;
+
     setLoading(true);
     setError(null);
     setResult(null);
 
     try {
-      // Separate endpoint: it needs an account, spends money, and takes seconds.
-      const response = await fetch(enhance ? "/api/enhance" : "/api/generate", {
+      const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, regenerate }),
+        body: JSON.stringify({ url: target, regenerate: force }),
       });
+
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Something went wrong.");
       setResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /** Reading a saved file needs no account, so it does not go through /api/generate. */
+  async function open(target: string) {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      const response = await fetch(`/api/saved?url=${encodeURIComponent(target)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Could not read that one.");
+      setResult(data);
+      setUrl(target);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not read that one.");
     } finally {
       setLoading(false);
     }
@@ -78,10 +112,17 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
     <div>
       <h1 className="text-3xl font-bold tracking-tight">llms.txt Generator</h1>
       <p className="mt-2 text-sm text-neutral-500">
-        Builds an llms.txt from a single page: its title, the pages it links to, and its text.
+        Crawls a site and writes its <code>llms.txt</code>. Generating needs an account; reading what has
+        been generated does not.
       </p>
 
-      <form onSubmit={generate} className="mt-8 flex gap-3">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void run(url, false);
+        }}
+        className="mt-8 flex gap-3"
+      >
         <input
           type="text"
           value={url}
@@ -91,33 +132,22 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
         />
         <button
           type="submit"
-          disabled={loading || !url.trim()}
+          disabled={loading || !url.trim() || !signedIn}
+          title={signedIn ? undefined : "Sign in to generate"}
           className="rounded-lg bg-neutral-900 px-6 py-3 font-medium text-white disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900"
         >
-          {loading ? (enhance ? "Thinking…" : "Fetching…") : "Generate"}
+          {loading ? "Working…" : "Generate"}
         </button>
       </form>
 
-      <label className="mt-3 flex items-center gap-2 text-sm text-neutral-500">
-        <input
-          type="checkbox"
-          checked={enhance}
-          disabled={!signedIn}
-          onChange={(e) => setEnhance(e.target.checked)}
-          className="h-4 w-4"
-        />
-        Improve the result with AI
-        {!signedIn &&
-          // Pointing an unconfigured deployment at /login would send someone to
-          // a page that cannot sign them in.
-          (authConfigured ? (
-            <a href="/login" className="underline">
-              (sign in required)
-            </a>
-          ) : (
-            <span>(not configured on this deployment)</span>
-          ))}
-      </label>
+      {!signedIn && (
+        <p className="mt-3 text-sm text-neutral-500">
+          <Link href="/login" className="underline">
+            Sign in
+          </Link>{" "}
+          to generate a new one. Anything already generated is below.
+        </p>
+      )}
 
       {error && (
         <p className="mt-6 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
@@ -132,16 +162,11 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
             {result.publishedAt}
           </a>
           . Someone there chose what belonged in it.{" "}
-          <button
-            type="button"
-            className="underline"
-            onClick={() => {
-              setRegenerate(true);
-              setResult(null);
-            }}
-          >
-            Generate one anyway
-          </button>
+          {signedIn && (
+            <button type="button" className="underline" onClick={() => void run(url, true)}>
+              Generate one anyway
+            </button>
+          )}
         </div>
       )}
 
@@ -149,45 +174,63 @@ export function Generator({ signedIn, authConfigured }: { signedIn: boolean; aut
         <section className="mt-8">
           <div className="flex items-center justify-between gap-4">
             <p className="text-sm text-neutral-500">
-              HTTP {result.status} · {result.contentType ?? "unknown type"} ·{" "}
               {result.llmsTxt.length.toLocaleString()} chars
-              {result.truncated && " (truncated)"}
-              {result.report && (
-                <>
-                  {" · "}
-                  <span>{describeReport(result.report)}</span>
-                </>
-              )}
-              {result.crawl && <>{" · "}<span>{result.crawl.pages} pages crawled</span></>}
+              {result.crawl && <> · {result.crawl.pages} pages crawled</>}
+              {result.report && <> · {describeReport(result.report)}</>}
+              {result.saved && result.generatedAt && <> · generated {age(result.generatedAt)}</>}
+              {result.stored && <> · saved</>}
               {result.spec && (
                 <>
                   {" · "}
-                  <span className={result.spec.valid ? "text-green-700 dark:text-green-500" : "text-amber-700 dark:text-amber-500"}>
-                    {result.spec.valid ? "conforms to llmstxt.org" : `${result.spec.issues.length} spec issue(s)`}
+                  <span
+                    className={
+                      result.spec.valid ? "text-green-700 dark:text-green-500" : "text-amber-700 dark:text-amber-500"
+                    }
+                  >
+                    {result.spec.valid ? "conforms to llmstxt.org" : "does not conform"}
                   </span>
                 </>
               )}
             </p>
-            <button
-              onClick={download}
-              className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium dark:border-neutral-700"
-            >
-              Download llms.txt
-            </button>
+            <div className="flex gap-3">
+              {result.saved && signedIn && (
+                <button
+                  onClick={() => void run(result.url, true)}
+                  className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium dark:border-neutral-700"
+                >
+                  Regenerate
+                </button>
+              )}
+              <button
+                onClick={download}
+                className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium dark:border-neutral-700"
+              >
+                Download
+              </button>
+            </div>
           </div>
-          {result.existingLlmsTxt && (
-            <p className="mt-3 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:bg-blue-950 dark:text-blue-300">
-              This site already publishes an llms.txt at{" "}
-              <a href={result.existingLlmsTxt} className="underline">
-                {result.existingLlmsTxt}
-              </a>
-              . Its own file is authoritative; this one is generated from a single page.
-            </p>
-          )}
-
           <pre className="mt-3 max-h-[32rem] overflow-auto rounded-lg bg-neutral-50 p-4 font-mono text-xs whitespace-pre-wrap dark:bg-neutral-900">
             {result.llmsTxt}
           </pre>
+        </section>
+      )}
+
+      {saved.length > 0 && (
+        <section className="mt-12">
+          <h2 className="text-sm font-medium text-neutral-500">Already generated</h2>
+          <ul className="mt-3 divide-y divide-neutral-200 dark:divide-neutral-800">
+            {saved.map((site) => (
+              <li key={site.url} className="flex items-center justify-between gap-4 py-2 text-sm">
+                <button type="button" onClick={() => void open(site.url)} className="truncate text-left underline">
+                  {site.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+                </button>
+                <span className="shrink-0 text-neutral-500">
+                  {age(site.generatedAt)}
+                  {site.changedAt ? " · updated since" : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
         </section>
       )}
     </div>
