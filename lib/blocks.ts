@@ -122,7 +122,7 @@ export function explain(block: Block, url: string): string {
 
   switch (block.kind) {
     case "bot-challenge":
-      return `${host} is behind an anti-bot challenge, so it serves a verification page instead of its content. Running the challenge needs a real browser; set RENDER_ENDPOINT to use one.`;
+      return `${host} is behind an anti-bot challenge, so it serves a verification page instead of its content. A site that went to that trouble cannot be read by a program, and the challenge page is not something to describe as if it were the site.`;
     case "login-required":
       return `${host} keeps that page behind a sign-in, so there is nothing public to read.`;
     case "rate-limited":

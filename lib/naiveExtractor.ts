@@ -21,6 +21,7 @@ import {
   parseHtml,
   walk,
 } from "./dom.ts";
+import { MAX_LINKS_PER_SECTION, chooseDepth, curate, groupKeyFor } from "./grouping.ts";
 import { coverage, humanize, sentences, similarity, stripBrandSuffix, titleCase } from "./nlp.ts";
 import { escapeBlock, escapeInline, escapeLinkText, escapeUrl } from "./spec.ts";
 
@@ -75,9 +76,6 @@ const NON_PAGE = /\.(png|jpe?g|gif|svg|webp|avif|ico|css|js|mjs|json|xml|rss|ato
 /** Locale segments name an audience, not a section: /docs/en/... is not "En". */
 const LOCALE_SEGMENT = /^(en|fr|de|es|it|ja|zh|ko|pt|ru|nl|pl|tr|vi|id|hi|ar|sv|da|no|fi|cs|el|he|th|uk)([-_][a-z]{2})?$/i;
 
-const MAX_LINKS_PER_SECTION = 25;
-const MAX_TOTAL_LINKS = 150;
-const MAX_SECTIONS = 12;
 
 const GENERIC_LABEL = /^(home|menu|more|links?|pages?|site|main|other|misc|navigation|explore)$/i;
 
@@ -424,40 +422,7 @@ function labelForGroup(
   return titleCase(label || humanize(group) || group);
 }
 
-/**
- * Which path segment to group on.
- *
- * The first one is the obvious choice and the wrong one for a documentation
- * site, where every page is /docs/something and the whole file collapses into
- * a single section. So: if one bucket swallows most of the links, go a segment
- * deeper for the pages that have one.
- */
-function groupKeyFor(segments: string[], depth: number): string {
-  if (segments.length <= 1) return "";
-  return segments[Math.min(depth, segments.length - 2)];
-}
 
-function chooseDepth(all: string[][]): number {
-  const deep = all.filter((segments) => segments.length > 1);
-  if (deep.length === 0) return 0;
-
-  const groupCount = (depth: number) => new Set(deep.map((segments) => groupKeyFor(segments, depth))).size;
-  const shallow = groupCount(0);
-  const deeper = groupCount(1);
-
-  // One bucket holding everything is not a grouping at all; if going a segment
-  // deeper actually separates the links, take it however few there are.
-  if (shallow <= 1 && deeper > 1) return 1;
-
-  const counts = new Map<string, number>();
-  for (const segments of deep) {
-    const key = groupKeyFor(segments, 0);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-
-  const largest = Math.max(...counts.values());
-  return deep.length >= 5 && largest >= 0.6 * deep.length && deeper > shallow ? 1 : 0;
-}
 
 /**
  * Whether the page is a shell that builds itself in the browser.
@@ -557,38 +522,6 @@ export function extract(html: string, url: string): Extraction {
   };
 }
 
-/**
- * Trims the result to something a reader can hold: a lone link is not a
- * section, there is a limit to how many sections earn their heading, and a
- * section past a couple of dozen links has stopped being a curated list.
- */
-function curate(sections: Section[]): Section[] {
-  const kept: Section[] = [];
-  const orphans: LinkEntry[] = [];
-
-  for (const section of sections) {
-    if (section.links.length === 1 && section.name !== "Pages") orphans.push(...section.links);
-    else kept.push(section);
-  }
-
-  const catchAll = kept.find((section) => section.name === "Pages");
-  if (orphans.length > 0) {
-    if (catchAll) catchAll.links.push(...orphans);
-    else kept.push({ name: "Pages", links: orphans });
-  }
-
-  const trimmed = kept.slice(0, MAX_SECTIONS);
-  let budget = MAX_TOTAL_LINKS;
-  const result: Section[] = [];
-
-  for (const section of trimmed) {
-    const links = section.links.slice(0, Math.min(MAX_LINKS_PER_SECTION, budget));
-    if (links.length === 0) break;
-    budget -= links.length;
-    result.push({ ...section, links });
-  }
-  return result;
-}
 
 /**
  * Renders in the order https://llmstxt.org fixes: H1, blockquote summary,

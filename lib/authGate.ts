@@ -12,7 +12,7 @@ export interface GateResult {
   error?: string;
 }
 
-export const ALLOWED: GateResult = { allowed: true, status: 200 };
+const ALLOWED: GateResult = { allowed: true, status: 200 };
 
 export function checkGenerateAccess({
   signedIn,

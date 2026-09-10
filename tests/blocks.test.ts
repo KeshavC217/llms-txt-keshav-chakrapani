@@ -65,7 +65,7 @@ test("the word 'challenge' in ordinary prose does not trip detection", () => {
 test("each block explains itself in terms of what to do", () => {
   const challenge = detectBlock(403, headers({ "cf-mitigated": "challenge" }), "")!;
   assert.match(explain(challenge, "https://openai.com/"), /openai\.com/);
-  assert.match(explain(challenge, "https://openai.com/"), /RENDER_ENDPOINT/);
+  assert.match(explain(challenge, "https://openai.com/"), /anti-bot challenge/);
 
   const limited = detectBlock(429, headers(), "")!;
   assert.match(explain(limited, "https://example.com/"), /rate limiting/i);

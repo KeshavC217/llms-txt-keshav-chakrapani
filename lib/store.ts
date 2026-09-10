@@ -56,22 +56,20 @@ import { SUPABASE_URL } from "./supabase/config.ts";
 const TABLE = "generations";
 
 /*
- * Two column lists, because a migration and a deploy arrive by different hands.
+ * The columns the table has, which db/schema.sql is the record of.
  *
- * Selecting a column the table does not have is an error, not an omission, so a
- * read asking for everything returns nothing at all - which emptied the saved
- * list entirely the first time this was tried before the migration had run.
- * Each read asks for the full set, and falls back to what has always existed.
+ * There used to be a second, shorter list for each of these and a retry that
+ * fell back to it, because selecting a column the table does not have is an
+ * error rather than an omission - a read asking for everything returns nothing
+ * at all, which emptied the saved list the first time this was deployed ahead
+ * of its migration. That was worth having while the schema lived only in
+ * someone's memory. It is written down now, so the fallback defended a state
+ * that no longer occurs and hid a real misconfiguration behind a partial row.
  */
-const BASE_COLUMNS = "url, llms_txt, content_hash, generated_at";
-const SELECT_COLUMNS = `${BASE_COLUMNS}, structure_hash, last_checked_at, changed_at, change_count, check_interval_hours, sitemap_hash, source, published_at`;
+const SELECT_COLUMNS =
+  "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, change_count, check_interval_hours, sitemap_hash, source, published_at";
 
-const BASE_SUMMARY = "url, generated_at";
-const SUMMARY_COLUMNS = `${BASE_SUMMARY}, changed_at, source`;
-
-/** True when a query failed only because the schema is older than the code. */
-const isMissingColumn = (error: { code?: string } | null) =>
-  error?.code === "PGRST204" || error?.code === "42703";
+const SUMMARY_COLUMNS = "url, generated_at, changed_at, source";
 
 export interface StoredGeneration {
   url: string;
@@ -113,10 +111,7 @@ export async function readGeneration(url: string): Promise<StoredGeneration | nu
   const supabase = client();
   if (!supabase) return null;
 
-  const attempt = await supabase.from(TABLE).select(SELECT_COLUMNS).eq("url", url).maybeSingle();
-  const { data, error } = isMissingColumn(attempt.error)
-    ? await supabase.from(TABLE).select(BASE_COLUMNS).eq("url", url).maybeSingle()
-    : attempt;
+  const { data, error } = await supabase.from(TABLE).select(SELECT_COLUMNS).eq("url", url).maybeSingle();
 
   // A missing table, a revoked key, an unreachable database: all mean "nothing
   // saved", which is a state this already handles.
@@ -156,11 +151,11 @@ export async function listGenerations(limit = 100): Promise<SavedSummary[]> {
   const supabase = client();
   if (!supabase) return [];
 
-  const query = (columns: string) =>
-    supabase.from(TABLE).select(columns).order("generated_at", { ascending: false }).limit(limit);
-
-  const attempt = await query(SUMMARY_COLUMNS);
-  const { data, error } = isMissingColumn(attempt.error) ? await query(BASE_SUMMARY) : attempt;
+  const { data, error } = await supabase
+    .from(TABLE)
+    .select(SUMMARY_COLUMNS)
+    .order("generated_at", { ascending: false })
+    .limit(limit);
 
   // The column list is chosen at runtime, so the client cannot infer a row
   // type for it; the shape is asserted here the same way fromRow does.
@@ -258,26 +253,6 @@ export async function writeGeneration(url: string, llmsTxt: string, options: Wri
     source: options.source ?? "generated",
     published_at: options.publishedAt ?? null,
   });
-  if (!error) return true;
 
-  /*
-   * The monitoring columns may not exist yet.
-   *
-   * Code and migration are deployed by different hands and rarely at the same
-   * moment. Without this, a deploy that lands first turns every write into a
-   * silent failure and caching simply stops - which is exactly what happened
-   * on the first run of this change locally. Writing the older shape keeps the
-   * feature that already worked working, and the next check fills in the
-   * fingerprint once the column is there.
-   */
-  // PGRST204 is what PostgREST returns for a column its schema cache does not
-  // know; 42703 is Postgres's own code for the same thing, kept in case the
-  // request ever reaches the database directly. The first is what actually
-  // came back when this was tried against the live project.
-  if (error.code === "PGRST204" || error.code === "42703") {
-    const { error: retry } = await supabase.from(TABLE).upsert(row);
-    return !retry;
-  }
-
-  return false;
+  return !error;
 }

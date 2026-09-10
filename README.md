@@ -58,7 +58,7 @@ lib/
     url.ts               one address per page
   pageMeta.ts            what a crawled page says about itself
   buildFromCrawl.ts      crawled pages -> the same Extraction shape
-  grouping.ts            links -> sections
+  grouping.ts            links -> sections, and the caps that keep a file curated
   naiveExtractor.ts      a page -> { siteName, summary, sections } -> llms.txt
   dom.ts                 HTML -> a small tree that can be measured
   nlp.ts                 tokenizing, stemming, overlap, sentence splitting
@@ -166,7 +166,7 @@ different things:
 |---|---|---|
 | 403, no challenge | `zillow.com` (by address reputation) | nothing that a header can fix |
 | 403 with an anti-bot challenge | `openai.com`, `g2.com`, `medium.com`, `indeed.com` | a real browser, and often more |
-| 200 with an empty shell | `docs.convex.dev` | a real browser |
+| 200 with an empty shell | `docs.convex.dev` | a real browser, which this does not have |
 
 **Headers.** We send `Accept` and `Accept-Language`, which some CDNs require, and identify ourselves
 honestly in the User-Agent. We do not retry as a browser.
@@ -184,11 +184,11 @@ refused us and why. This matters more than it sounds: a challenge page parses pe
 before this the generator turned Medium into an llms.txt summarised as *"This website is using a
 security service to protect itself from online attacks."* A confident file about Cloudflare.
 
-**A browser, when there is one.** Set `RENDER_ENDPOINT` to a Browserless-compatible service and a
-shell or a challenge is retried through it. Chromium is not bundled - it does not fit comfortably in
-a Vercel function, and it is needed on a small fraction of requests - so the browser lives behind an
-HTTP call and swapping provider is an env var. Rendered HTML is adopted only if it extracts *more*
-links than the plain response did; a bigger page with nothing on it is not an improvement.
+**No browser.** There was one, behind a `RENDER_ENDPOINT` env var pointing at a Browserless-style
+service, and it was removed rather than kept as an option. It had never run - the variable was set in
+no environment - and the measurement below is why it would not have helped where it was aimed:
+headless browsers do not get past a challenge, and a server has no screen. What it could genuinely
+fix is the third row, application shells, which is a real but narrower problem than the code implied.
 
 **Does a real browser solve it?** Measured with Playwright, and the answer depends entirely on
 whether the browser has a screen:
@@ -552,11 +552,13 @@ The table is [`db/schema.sql`](db/schema.sql): the four original columns, the se
 added, and `source`/`published_at` for telling a site's own file from ours. It is idempotent, so it
 doubles as the migration for a deployment that predates either change.
 
-`lib/store.ts` tolerates an older schema on purpose - selecting a column PostgREST does not know
-about returns *nothing at all* rather than a partial row, which emptied the saved list the first
-time this was deployed ahead of its migration - so every read asks for the full set and falls back
-to the original four. That is a safety net for the window between a deploy and a migration, not a
-reason to skip running the file.
+`lib/store.ts` used to tolerate an older schema, falling back to the original four columns when
+PostgREST reported one it did not know - selecting a missing column returns *nothing at all* rather
+than a partial row, which emptied the saved list the first time this was deployed ahead of its
+migration. That was worth having while the schema lived only in someone's memory. Now that the file
+above is the record, the fallback defended a state that no longer occurs and would hide a real
+misconfiguration behind a silently partial row, so it is gone. **Run `db/schema.sql` before the
+first deploy.**
 
 RLS is enabled with **no policies at all**, so the publishable key can neither read nor write:
 verified against the live project, a browser-key read returns zero rows and a browser-key insert is
@@ -703,7 +705,6 @@ The short version:
 | `SUPABASE_SECRET_KEY` | the store, and therefore monitoring. Server only, never `NEXT_PUBLIC_` |
 | `OPENROUTER_API_KEY` | the summary, the section names and the per-link notes |
 | `CRON_SECRET` | `POST /api/refresh`; without it the endpoint refuses everything |
-| `RENDER_ENDPOINT` | a browser for pages whose links only exist after JavaScript |
 | `ALLOW_PRIVATE_CRAWL_TARGETS` | testing against a local server, past the SSRF guard |
 
 The crawl and monitor tunables (`CRAWL_MAX_PAGES`, `MONITOR_*`) have working defaults and are

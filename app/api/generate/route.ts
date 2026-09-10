@@ -7,7 +7,6 @@ import { extract, linkCount } from "@/lib/naiveExtractor";
 import { fetchPage, normalizeUrl, USER_AGENT } from "@/lib/fetchPage";
 import { findPublished } from "@/lib/published";
 import { generate } from "@/lib/generate";
-import { renderConfigured, renderPage } from "@/lib/render";
 import { structureHash } from "@/lib/monitor";
 import { authConfigured } from "@/lib/supabase/config";
 import { getUser } from "@/lib/supabase/server";
@@ -93,17 +92,13 @@ export async function POST(request: Request) {
   }
 
   // A challenge page parses perfectly well and describes nothing but the
-  // challenge, so it must not be turned into an llms.txt.
+  // challenge, so it must not be turned into an llms.txt. Saying which site
+  // refused us and why is the whole of what can be done about it.
   if (page.block) {
-    const rendered = page.block.kind === "bot-challenge" && renderConfigured() ? await renderPage(page.url) : null;
-
-    if (!rendered) {
-      return NextResponse.json(
-        { error: explain(page.block, page.url), blocked: page.block.kind, url: page.url },
-        { status: 502 },
-      );
-    }
-    page = { ...page, body: rendered.html, block: undefined, isHtml: true };
+    return NextResponse.json(
+      { error: explain(page.block, page.url), blocked: page.block.kind, url: page.url },
+      { status: 502 },
+    );
   }
 
   if (!page.isHtml) {
@@ -135,21 +130,17 @@ export async function POST(request: Request) {
   }
 
   const generated = await generate(page.body, page.url, { seed, deadline });
-  let extraction = generated.extraction;
+  const extraction = generated.extraction;
 
   // Nothing extracted is worth a second look: some sites serve a challenge
   // with a 200, which the status check above cannot see.
   if (linkCount(extraction) === 0) {
     const late = classifyEmpty(page.body);
     if (late) {
-      const rendered = renderConfigured() ? await renderPage(page.url) : null;
-      if (!rendered) {
-        return NextResponse.json(
-          { error: explain(late, page.url), blocked: late.kind, url: page.url },
-          { status: 502 },
-        );
-      }
-      extraction = extract(rendered.html, page.url);
+      return NextResponse.json(
+        { error: explain(late, page.url), blocked: late.kind, url: page.url },
+        { status: 502 },
+      );
     }
   }
 

@@ -145,7 +145,7 @@ export function* walk(node: ElementNode): Generator<ElementNode> {
   }
 }
 
-export function textOf(node: Node): string {
+function textOf(node: Node): string {
   if (!isElement(node)) return node.text;
   return node.children.map(textOf).join(" ");
 }
