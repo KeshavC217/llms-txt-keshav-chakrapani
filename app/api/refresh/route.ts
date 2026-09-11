@@ -9,7 +9,7 @@ import { fetchRobots } from "@/lib/crawl/robots";
 import { generate } from "@/lib/generate";
 import { extract } from "@/lib/naiveExtractor";
 import { generationsToCheck, hashContent, recordCheck, storeConfigured } from "@/lib/store";
-import { RunBudget, intervalAfter, isDue, sitemapHash, structureHash } from "@/lib/monitor";
+import { CHECK_INTERVAL_HOURS, RunBudget, isDue, sitemapHash, structureHash } from "@/lib/monitor";
 
 /**
  * Re-checks stored sites and updates the ones that have moved.
@@ -82,9 +82,7 @@ export async function POST(request: Request) {
   }
 
   const started = Date.now();
-  const due = (await generationsToCheck(MAX_CHECKS * 2)).filter((row) =>
-    isDue(row.lastCheckedAt ?? null, row.checkIntervalHours ?? 24),
-  );
+  const due = (await generationsToCheck(MAX_CHECKS * 2)).filter((row) => isDue(row.lastCheckedAt ?? null));
 
   const checked: Record<string, string>[] = [];
   const queue = due.slice(0, MAX_CHECKS);
@@ -119,17 +117,14 @@ export async function POST(request: Request) {
           continue;
         }
 
-        const interval = intervalAfter(row.checkIntervalHours ?? 24, outcome);
-
         await recordCheck(row.url, {
           structureHash: outcome.structureHash ?? row.structureHash ?? "",
           sitemapHash: outcome.sitemapHash ?? row.sitemapHash ?? undefined,
-          checkIntervalHours: interval,
           changed: outcome.changed,
           llmsTxt: outcome.llmsTxt,
         });
 
-        checked.push({ url: row.url, result: outcome.result, next: `${interval}h` });
+        checked.push({ url: row.url, result: outcome.result, next: `${CHECK_INTERVAL_HOURS}h` });
       } catch (error) {
         // One site's failure must not end the run: the others are still due.
         checked.push({ url: row.url, result: "error", detail: String(error).slice(0, 80) });

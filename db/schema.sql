@@ -19,20 +19,28 @@ create table if not exists public.generations (
   generated_at timestamptz not null default now()
 );
 
--- Monitoring. A row carries its own schedule, so a site that changes often is
--- checked often and a static one is left alone; see lib/monitor.ts.
+-- Monitoring. Every site is checked on the same flat interval - six hours, in
+-- lib/monitor.ts - so a row carries what a check compares against, and when it
+-- last happened, but no schedule of its own.
 alter table public.generations
   -- Fingerprint of the site's structure, model-free: what a check compares.
-  add column if not exists structure_hash       text,
+  add column if not exists structure_hash  text,
   -- Fingerprint of the sitemap alone, which settles most checks for one request.
-  add column if not exists sitemap_hash         text,
-  add column if not exists last_checked_at      timestamptz,
+  add column if not exists sitemap_hash    text,
+  add column if not exists last_checked_at timestamptz,
   -- Last time a check found the site had actually moved.
-  add column if not exists changed_at           timestamptz,
-  add column if not exists change_count         integer     not null default 0,
-  -- Halves on a change, grows by half without one, bounded by
-  -- MONITOR_MIN/MAX_INTERVAL_HOURS.
-  add column if not exists check_interval_hours integer     not null default 24;
+  add column if not exists changed_at      timestamptz,
+  add column if not exists change_count    integer     not null default 0;
+
+-- The per-site interval that used to live here halved on a change and grew by
+-- half on a quiet check, drifting to a weekly ceiling. It adapted the cheap
+-- half of the system - a check is usually one request - while the expensive
+-- half was already gated on evidence of change, so what it actually bought was
+-- up to seven days of a file being wrong about a site that had moved. Nothing
+-- reads this column now, and a column written by nobody and read by nobody is
+-- the kind of thing that gets mistaken for live.
+alter table public.generations
+  drop column if exists check_interval_hours;
 
 -- Whose file this is. 'generated' means we crawled the site and wrote it;
 -- 'published' means the site publishes its own and this is a copy, in which

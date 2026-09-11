@@ -5,18 +5,20 @@ name: Monitor
 # only wakes it up.
 on:
   schedule:
-    # Every five minutes, which is GitHub's shortest permitted interval, offset
-    # so it never fires on the hour: GitHub documents that scheduled events are
-    # delayed under load, that "high load times include the start of every
-    # hour", and that queued jobs may be dropped outright.
+    # Every fifteen minutes, offset so it never fires on the hour: GitHub
+    # documents that scheduled events are delayed under load, that "high load
+    # times include the start of every hour", and that queued jobs may be
+    # dropped outright.
     #
-    # This is not how often a site is checked - each row carries its own
-    # interval, from an hour to a week. It is how quickly a site that has
-    # become due gets picked up, and how fast the queue drains.
+    # This is not how often a site is checked - that is a flat six hours per
+    # site, in lib/monitor.ts. It is how precisely a site that has become due
+    # gets picked up: fifteen minutes of slack on a six-hour interval is four
+    # percent, which nobody can perceive in a file about a website, and it is
+    # a quarter of the runs for the same result.
     #
     # GitHub also disables schedules on repositories with no activity for 60
     # days, so a quiet repository stops monitoring without saying so.
-    - cron: "2-59/5 * * * *"
+    - cron: "7,22,37,52 * * * *"
   # Available by hand, which is how it gets tested without waiting six hours.
   workflow_dispatch:
 

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { RunBudget, intervalAfter, isDue, nextInterval, sitemapHash, structureHash } from "../lib/monitor.ts";
+import { CHECK_INTERVAL_HOURS, RunBudget, isDue, sitemapHash, structureHash } from "../lib/monitor.ts";
 import type { Extraction } from "../lib/naiveExtractor.ts";
 
 const extraction = (links: [string, string][], siteName = "Acme"): Extraction => ({
@@ -54,37 +54,30 @@ test("the sitemap hash sees added and removed pages, not order", () => {
   assert.notEqual(a, sitemapHash(["https://x.com/1"]));
 });
 
-test("a site that changes is watched more closely, one that does not is left alone", () => {
-  assert.ok(nextInterval(24, true) < 24);
-  assert.ok(nextInterval(24, false) > 24);
-});
-
-test("the interval stays within bounds however long it goes either way", () => {
-  // A quiet site drifts to weekly in about five checks; a changing one drops
-  // to hourly in about the same. Neither runs away.
-  let quiet = 24;
-  for (let i = 0; i < 40; i += 1) quiet = nextInterval(quiet, false);
-  assert.equal(quiet, 24 * 7, `${quiet} hours is too long to ignore a site`);
-
-  let busy = 24;
-  for (let i = 0; i < 40; i += 1) busy = nextInterval(busy, true);
-  assert.equal(busy, 1, `${busy} hours is too patient for a site that keeps moving`);
+test("every site is on the same interval, and it is the stated one", () => {
+  // The number is the promise: nothing here is ever further behind the site
+  // it describes than this. It is worth a test precisely because it is a
+  // constant - the previous design's ceiling was seven days, and nobody
+  // reading the code could say so without simulating the recurrence.
+  assert.equal(CHECK_INTERVAL_HOURS, 6);
 });
 
 test("a row that has never been checked is due", () => {
   // Otherwise a newly stored site would wait for a timestamp it does not have.
-  assert.equal(isDue(null, 24), true);
-  assert.equal(isDue("not a date", 24), true);
+  assert.equal(isDue(null), true);
+  assert.equal(isDue("not a date"), true);
 });
 
-test("due-ness is measured against the interval the row carries", () => {
+test("due-ness is measured against the interval, whoever supplies it", () => {
   const now = Date.parse("2026-09-09T12:00:00Z");
   const hoursAgo = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
 
   assert.equal(isDue(hoursAgo(5), 6, now), false);
   assert.equal(isDue(hoursAgo(7), 6, now), true);
-  // The same timestamp, a longer interval: a quiet site is left alone.
-  assert.equal(isDue(hoursAgo(7), 24, now), false);
+
+  // The caller passes nothing, which is how the route calls it: six hours.
+  assert.equal(isDue(hoursAgo(5), undefined, now), false);
+  assert.equal(isDue(hoursAgo(7), undefined, now), true);
 });
 
 /* --- what one run may spend -------------------------------------------- */
@@ -138,30 +131,13 @@ test("a run stops taking rows once its time is spent", () => {
   assert.equal(run.expired(45_001), true);
 });
 
-/* --- what a check does to the interval ---------------------------------- */
-
-test("a check that could not tell leaves the interval alone", () => {
-  // Treating "we could not read it" as "nothing changed" would widen the
-  // interval of exactly the sites that are hardest to read, until they were
-  // barely checked at all.
-  for (const result of ["skipped", "baseline"]) {
-    assert.equal(intervalAfter(24, { result, changed: false }), 24, result);
-  }
-});
-
-test("a conclusive check moves the interval", () => {
-  assert.equal(intervalAfter(24, { result: "changed", changed: true }), 12);
-  assert.equal(intervalAfter(24, { result: "unchanged", changed: false }), 36);
-  assert.equal(intervalAfter(24, { result: "unchanged-sitemap", changed: false }), 36);
-});
-
 test("a site just generated is not immediately due for a check", () => {
   // writeGeneration records the moment as the row's first check, because
   // generating a site is looking at it. Without that the next scheduled run
   // spends a check asking whether the site changed since we built it.
   const now = Date.parse("2026-09-10T12:00:00Z");
 
-  assert.equal(isDue(new Date(now - 1_000).toISOString(), 24, now), false);
+  assert.equal(isDue(new Date(now - 1_000).toISOString(), undefined, now), false);
   // A row that genuinely has never been checked still is.
-  assert.equal(isDue(null, 24, now), true);
+  assert.equal(isDue(null, undefined, now), true);
 });

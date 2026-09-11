@@ -18,15 +18,25 @@ import type { Extraction } from "./naiveExtractor.ts";
 import { hashContent } from "./store.ts";
 
 /**
- * Checked no more often than this, and no less often than that.
+ * How long a site is left alone between checks.
  *
- * An hour is affordable because a check is usually one request: the sitemap
- * settles most of them, and only a site whose page list moved is crawled. A
- * fortnight was too patient at the other end - a site that has been quiet for
- * two weeks can still change today.
+ * One number for every site, and it used to be a per-site interval that
+ * halved on a change and grew by half on a quiet check. That adapted the
+ * cheap half of the system: a check is usually one request, because the
+ * sitemap hash settles it and only a site whose page list moved is crawled,
+ * and the expensive half - the crawl, the two model passes - is already gated
+ * on evidence that something changed. So the backoff was throttling the tier
+ * that costs almost nothing, and buying, at its ceiling, up to seven days of
+ * a file being wrong about a site that had moved. That is the one thing this
+ * tool exists not to do.
+ *
+ * Six hours, fixed, is four checks a day per site: at four hundred sites,
+ * sixteen hundred mostly-single-request checks spread across the day, which
+ * the budget does not notice. What it buys is a bound anyone can state
+ * without reading the code - nothing here is ever more than six hours behind
+ * the site it describes.
  */
-const MIN_INTERVAL_HOURS = Number(process.env.MONITOR_MIN_INTERVAL_HOURS ?? 1);
-const MAX_INTERVAL_HOURS = Number(process.env.MONITOR_MAX_INTERVAL_HOURS ?? 24 * 7);
+export const CHECK_INTERVAL_HOURS = Number(process.env.MONITOR_INTERVAL_HOURS ?? 6);
 
 /**
  * A fingerprint of what the crawl found: which pages exist and what they are
@@ -41,23 +51,7 @@ export function structureHash(extraction: Extraction): string {
   return hashContent([extraction.siteName, ...entries].join("\n"));
 }
 
-/**
- * When to look again.
- *
- * A site that keeps changing is worth watching closely; one that has not moved
- * in a fortnight is not worth asking about daily. The interval halves on a
- * change and grows by half on a quiet check, which settles quickly in both
- * directions without oscillating.
- */
-export function nextInterval(currentHours: number, changed: boolean): number {
-  // Halving on a change and growing by half on a quiet check settles quickly
-  // in both directions: a site that changes twice drops from a day to six
-  // hours, and one that never does drifts to weekly in about five checks.
-  const proposed = changed ? currentHours / 2 : currentHours * 1.5;
-  return Math.min(Math.max(Math.round(proposed), MIN_INTERVAL_HOURS), MAX_INTERVAL_HOURS);
-}
-
-export function isDue(lastCheckedAt: string | null, intervalHours: number, now = Date.now()): boolean {
+export function isDue(lastCheckedAt: string | null, intervalHours: number = CHECK_INTERVAL_HOURS, now = Date.now()): boolean {
   // Never checked is always due; that is a row this has not seen before.
   if (!lastCheckedAt) return true;
 
@@ -149,19 +143,3 @@ export class RunBudget {
   }
 }
 
-/**
- * How long until this row is looked at again.
- *
- * A check that could not reach a conclusion - the site was blocked, served
- * something that is not HTML, or gave a crawl cut short by its safety valve -
- * must not move the interval in either direction. Treating "we could not tell"
- * as "nothing changed" would widen the interval of exactly the sites that are
- * hardest to read, until they were barely checked at all.
- */
-export function intervalAfter(
-  currentHours: number,
-  outcome: { result: string; changed: boolean },
-): number {
-  const inconclusive = outcome.result === "skipped" || outcome.result === "baseline";
-  return inconclusive ? currentHours : nextInterval(currentHours, outcome.changed);
-}
