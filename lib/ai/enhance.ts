@@ -7,6 +7,7 @@ import { runGuide } from "./guide.ts";
 import { type FailureKind, ModelError, isFatal } from "./errors.ts";
 import { guideModel, workerModel } from "./models.ts";
 import { Deadline } from "../deadline.ts";
+import type { ProgressEvent } from "../progress.ts";
 
 /**
  * The whole sieve, end to end: guide, then annotate, then keep only what
@@ -57,6 +58,7 @@ export async function enhance(
   url: string,
   transports?: { guide: Transport; worker: Transport },
   requestDeadline?: Deadline,
+  onProgress?: (event: Extract<ProgressEvent, { stage: "summarizing" | "annotating" }>) => void,
 ): Promise<EnhanceResult> {
   const deterministic = render(extraction, url);
   const report = emptyReport();
@@ -84,6 +86,8 @@ export async function enhance(
   const guideTransport = transports?.guide ?? openRouter(700);
   const workerTransport = transports?.worker ?? openRouter(900);
 
+  onProgress?.({ stage: "summarizing" });
+
   // One deadline for both stages: whatever has arrived by then is used, and
   // the rest is dropped. The abort is what stops a slow model from holding the
   // request open past the function's own limit.
@@ -110,7 +114,12 @@ export async function enhance(
       };
     }
 
-    const { notes, failed, failures, fatal } = await runAnnotation(extraction, workerTransport, controller.signal);
+    const { notes, failed, failures, fatal } = await runAnnotation(
+      extraction,
+      workerTransport,
+      controller.signal,
+      (completed, total) => onProgress?.({ stage: "annotating", completed, total }),
+    );
     report.chunksFailed = failed;
     report.failures = failures;
 

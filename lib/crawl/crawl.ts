@@ -19,6 +19,7 @@ import { Pacer } from "./pacer.ts";
 import { fetchRobots, isAllowed, type Robots } from "./robots.ts";
 import { fetchSitemap, sitemapCandidates } from "./sitemap.ts";
 import { Deadline } from "../deadline.ts";
+import type { ProgressEvent } from "../progress.ts";
 
 /**
  * One ceiling for every crawl.
@@ -89,6 +90,8 @@ export interface CrawlOptions {
   /** The request's clock. The crawl takes the earlier of this and its valve. */
   deadline?: Deadline;
   brand?: string;
+  /** Fires as pages settle, so a caller can narrate "12 of 50" while it waits. */
+  onProgress?: (event: Extract<ProgressEvent, { stage: "crawling" }>) => void;
 }
 
 /** Not pages: assets, downloads, feeds. */
@@ -97,6 +100,11 @@ const NON_PAGE =
 
 export async function crawl(origin: string, options: CrawlOptions): Promise<CrawlResult> {
   const host = new URL(origin).host;
+
+  // Fired once up front, at 0 of 0: robots.txt and the sitemap can take a
+  // couple of seconds on their own, and a caller narrating this step should
+  // not sit on the previous stage's label while that happens.
+  options.onProgress?.({ stage: "crawling", fetched: 0, planned: 0 });
 
   // Whichever expires first: the crawl's own valve, or what the request has
   // left. Discovery is inside it too - a site that takes six seconds to serve
@@ -182,6 +190,18 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
   let expired = false;
   let planned = 0;
 
+  /**
+   * How many pages have reached a final state - found or given up on - across
+   * every wave so far. Distinct from `fetched`, which counts raw attempts and
+   * so double-counts a retry; a caller narrating progress wants "how many of
+   * the plan are done", not how many requests were made.
+   */
+  let settled = 0;
+  const settle = () => {
+    settled += 1;
+    options.onProgress?.({ stage: "crawling", fetched: settled, planned });
+  };
+
   async function attempt(url: string): Promise<PageMeta | null> {
     const at = Date.now();
     const response = await fetch(url, {
@@ -242,6 +262,7 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
           const page = await attempt(url);
           if (page) {
             results.set(index, page);
+            settle();
             continue;
           }
         } catch {
@@ -256,6 +277,7 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
          */
         if (!budget.allows(MIN_ATTEMPT_MS) || !(await pacer.wait(budget, MIN_ATTEMPT_MS))) {
           failed += 1;
+          settle();
           expired = true;
           return;
         }
@@ -268,6 +290,7 @@ export async function crawl(origin: string, options: CrawlOptions): Promise<Craw
         } catch {
           failed += 1;
         }
+        settle();
       }
     }
 

@@ -57,11 +57,14 @@ export async function runAnnotation(
   extraction: Extraction,
   transport: Transport,
   signal: AbortSignal,
+  /** Fires as each chunk settles, so a caller can narrate "3 of 8 groups". */
+  onProgress?: (completed: number, total: number) => void,
 ): Promise<{ notes: Record<string, unknown>; failed: number; failures: Partial<Record<FailureKind, number>>; fatal?: ModelError }> {
   const chunks = chunkLinks(extraction);
   const notes: Record<string, unknown> = {};
   const failures: Partial<Record<FailureKind, number>> = {};
   let failed = 0;
+  let completed = 0;
   let next = 0;
   let fatal: ModelError | undefined;
 
@@ -69,7 +72,9 @@ export async function runAnnotation(
     while (next < chunks.length) {
       // An empty account or a rejected key fails every remaining chunk the same
       // way. Stopping is both faster and more honest than proving it a dozen
-      // more times.
+      // more times. Those chunks never start, so they are not counted as
+      // completed either - the caller's count stops moving, honestly, rather
+      // than jumping to a total it did not reach.
       if (fatal) return;
 
       const chunk = chunks[next++];
@@ -95,6 +100,11 @@ export async function runAnnotation(
         const kind = error instanceof ModelError ? error.kind : "unknown";
         failures[kind] = (failures[kind] ?? 0) + 1;
         if (error instanceof ModelError && isFatal(kind)) fatal = error;
+      } finally {
+        // finally, not the tail of the try, so the continue above still
+        // counts: a chunk whose reply was unparseable has still settled.
+        completed += 1;
+        onProgress?.(completed, chunks.length);
       }
     }
   }
