@@ -78,9 +78,9 @@ A first run also needs the table: apply [`db/schema.sql`](db/schema.sql) in the 
 
 ```
 TEMPLATE.txt             the target shape, and the rules the extractor follows
-db/schema.sql            the one table, and the two migrations that grew it
+db/schema.sql            the one table, and the migrations that grew and pruned it
 app/
-  page.tsx               the saved list, server-rendered; Generator.tsx is the client half
+  page.tsx               the catalog, server-rendered; Generator.tsx is the client half
   login/                 email + password sign-in
   api/generate/route.ts  POST { url } -> published? -> crawl -> models -> store
   api/saved/route.ts     GET the saved list, or one file. No account needed.
@@ -91,6 +91,7 @@ lib/
   progress.ts            what "generating" is made of, so a stage becomes a label and a percent
   fetchPage.ts           one page, with the SSRF guard and the block detector
   blocks.ts              telling a challenge page from a real one
+  render.ts              a real browser, for sites whose links only exist after JavaScript
   published.ts           finding and recognising a site's own llms.txt
   crawl/
     crawl.ts             the crawl itself: discover, plan, fetch, collect
@@ -109,669 +110,87 @@ lib/
   spec.ts                the llmstxt.org grammar: escaping out, parsing back
   monitor.ts             fingerprints and the six-hour check interval
   store.ts               the generations table
+  catalog.ts             how a saved site is written down, and how a person finds one
+scripts/
+  gate-deploy.mjs        Vercel's Ignored Build Step: no green CI, no deploy
+  screenshots.mjs        the images above, retaken rather than re-staged
+  bench.mjs              times the candidate models
+  integration.mjs        grades output against sites that publish their own file
 tests/
   fixtures.ts            mock pages, one per genre the extractor meets
   *.test.ts              node:test suites, run with `npm test`
 ```
 
-`POST /api/generate` takes `{ "url": "example.com", "regenerate": false }`. What comes back depends
-on whether there was any real work to do.
-
-**Nothing to do** - a saved file already answers the question - is a single `application/json`
-object, exactly as it always was:
-
-```json
-{
-  "url": "https://example.com/",
-  "llmsTxt": "# Example\n\n> ...\n\n## Docs\n\n- [Quickstart](...): ...\n",
-  "saved": true,
-  "generatedAt": "2026-09-10T12:00:00.000Z",
-  "lastCheckedAt": "2026-09-10T12:00:00.000Z",
-  "spec": { "valid": true, "issues": [] }
-}
-```
-
-**Real work** - fetching, maybe rendering, crawling, two model passes - is narrated as it happens
-rather than made the caller wait on in silence. The response is `application/x-ndjson`: one JSON
-object per line, streamed as each stage starts or a page or chunk settles, ending in one line that
-carries the outcome:
-
-```
-{"type":"progress","stage":"fetching"}
-{"type":"progress","stage":"crawling","fetched":1,"planned":42}
-{"type":"progress","stage":"crawling","fetched":2,"planned":42}
-...
-{"type":"progress","stage":"annotating","completed":3,"total":6}
-{"type":"result","ok":true,"status":200,"url":"...","llmsTxt":"...","crawl":{...},"report":{...},"spec":{...}}
-```
-
-The HTTP status is always 200 once the stream starts - there is nowhere left to put a different one
-- so `status` in the result line carries what it would have been: 502 for a blocked site, 415 for a
-non-HTML response, 400 for an unreachable host. `lib/progress.ts` is the shape of every progress
-line and the weights that turn a stage into a position on a bar; `app/Generator.tsx` is the reader,
-using `response.headers.get("content-type")` to tell the two shapes apart before choosing how to
-read the body.
-
-A stored file, a site's own file (`source: "published"`, with `publishedAt`), and a refusal
-(`blocked`, with the kind of block) are still the three outcomes a *finished* request can carry -
-that has not changed, only how a caller learns about the time in between. `regenerate: true` skips
-both short circuits and always streams.
-
-`TEMPLATE.txt` defines what is being aimed at, generalized from the spec at
-[llmstxt.org](https://llmstxt.org) and from 22 files sampled off
-[llmstxt.site](https://llmstxt.site). The generated file is:
-
-```
-# Site name                  og:site_name, og:title, <title>, <h1>, then the hostname
-> one-sentence summary       meta description, og:/twitter: variants, or the AI guide pass
-
-orienting prose              optional, and omitted rather than padded
-
-## Section name              a nav heading, or the shared path segment
-- [title](url): note         the page's own <title> and description, or an AI note
-
-## Optional                  pages that exist but are rarely what an agent came for
-- [title](url): note
-```
-
-### What the extractor infers
-
-The extractor sees one document at a time and no model. It runs first on the page you gave, which
-supplies the site name, the summary and the orienting prose; the crawl then feeds it every other
-page. Everything here is inferred from structure and word overlap.
-
-- **Boilerplate.** Link density decides what is navigation: a nav is nearly all link text, a
-  paragraph is nearly none. Chrome is read for its *links* and discarded for its prose, so menus
-  no longer land in the body.
-- **Sections.** Links group by shared path segment, and the grouping goes a segment deeper when
-  one bucket would swallow most of the page — otherwise every documentation site collapses into a
-  single `/docs` section. Locale segments are skipped, so `/docs/en/...` is not a section called
-  "En". Names come from the page's own nav headings when one covers the group in both directions,
-  else from the segment itself.
-- **Duplicates.** URLs are canonicalized (fragment, trailing slash, tracking parameters, scheme) and
-  titles compared by stemmed token overlap, so "Pricing" and "Our Pricing" collapse to the shorter.
-  One canonicaliser, in `lib/crawl/url.ts` — there were three, and they disagreed. The address you
-  paste goes through the same list, because it becomes the key the file is stored under: a URL
-  copied out of an ad (`?vector_id=…&gclid=…`) is the site's home page, not a site of its own.
-- **One entry per page.** A query string is usually a variant rather than a page: `airbnb.com`
-  linked its gift-card page ten times as `?card_name=arctic`, `&baths`, `&cozy`, and an entire
-  section of the file was one page under ten spellings. It cannot simply be dropped, because
-  `en.wikipedia.org` addresses every article as `/w/index.php?title=X`. What separates them is the
-  title, which the crawler has because it fetched the page: same address and same page-name is one
-  link, same address and different names is several. Titles are matched by containment rather than
-  equality, since the same page arrives as "Connections" from a link and "Connections - Group words
-  that share a common thread" from its own `<title>`.
-- **Operations are not pages.** `?action=edit`, `?action=history`, `?printable=yes`,
-  `?mobileaction=`, `?oldid=` and their siblings are dropped. Thirteen of the fifty-two links
-  generated for `en.wikipedia.org` were these — "Revision history", "Printable version", "Switch to
-  legacy parser". An llms.txt says what a site contains; it should never point an agent at an edit
-  form. `action` is matched on its value, because plenty of sites use `?action=` for real content.
-- **Notes.** Taken only from a container holding exactly one link — a card or list item, never a
-  nav list, whose "neighbouring text" is just the other menu entries. Anything restating its own
-  title, or reading as concatenated labels rather than prose, is dropped instead of padded out.
-- **Curation.** Capped at 25 links a section and 150 overall; single-link sections merge into the
-  catch-all. A 238-link dump of a Wikipedia article is a sitemap, which is the thing llms.txt
-  exists not to be.
-
-A non-HTML response has nothing to parse and passes through unchanged.
-
-### Conformance
-
-The output follows the grammar at [llmstxt.org](https://llmstxt.org) strictly: one H1 and it comes
-first, no heading deeper than H2, sections that contain list items and nothing else, and every item
-carrying a hyperlink. Values are escaped on the way out, so a page whose link title contains `]`,
-whose URL contains `(`, or whose first paragraph begins `##` cannot produce a file that stops
-parsing.
-
-`lib/spec.ts` implements the grammar both ways - escaping to make output conform, parsing to check
-it did. Every response reports the result:
-
-```json
-"spec": { "valid": true, "issues": [] }
-```
-
-`npm test` includes the conformance suite: the spec's own FastHTML example, seven files that must be
-rejected, and eight hostile pages run through the real pipeline. CI runs it on every PR. The
-adversarial cases earned their place - they caught a bug where correctly escaped `\[draft\]` was
-rejected by the validator's own regex.
-
-Two things the spec recommends that this does not do. It asks that links point at markdown versions
-of pages; we cannot know a `.md` twin exists without fetching it, and inventing those URLs would
-mean emitting links we have never seen. And where a page advertises
-`rel="alternate" type="text/markdown"` or `rel="describedby"`, that is reported rather than acted
-on - a markdown twin for the fetched page says nothing verifiable about the pages it links to. If a
-site already publishes its own llms.txt, the UI says so: theirs is authoritative.
-
-### When a site will not let us read it
-
-Measured across a sample of well-known sites, refusals fall into three kinds that need three
-different things:
-
-| what happens | example | what it needs |
-|---|---|---|
-| 403, no challenge | `zillow.com` (by address reputation) | nothing that a header can fix |
-| 403 with an anti-bot challenge | `openai.com`, `g2.com`, `medium.com`, `indeed.com` | a real browser, and often more |
-| 200 with an empty shell | `docs.convex.dev` | a real browser, which this does not have |
-
-**Headers.** We send `Accept` and `Accept-Language`, which some CDNs require, and identify ourselves
-honestly in the User-Agent. We do not retry as a browser.
-
-That was tried and removed. `zillow.com` looked like the case for it - 403 to curl, a full page to
-us - until the difference turned out to be the HTTP client rather than the header: zillow refuses
-curl whatever User-Agent it sends, and served Node's fetch whatever User-Agent *it* sent, until
-repeated testing from one address turned that into a 403 as well. What varies is TLS fingerprint and
-address reputation, neither of which a header changes. Nothing in a thirty-site scan was helped by
-the swap, so the code went rather than shipping an impersonation that could not be shown to work.
-
-**Challenges are detected rather than fought.** `cf-mitigated: challenge`, `challenge-platform`,
-`_cf_chl` and their siblings are recognised from live responses, and the endpoint says which site
-refused us and why. This matters more than it sounds: a challenge page parses perfectly well, and
-before this the generator turned Medium into an llms.txt summarised as *"This website is using a
-security service to protect itself from online attacks."* A confident file about Cloudflare.
-
-**No browser.** There was one, behind a `RENDER_ENDPOINT` env var pointing at a Browserless-style
-service, and it was removed rather than kept as an option. It had never run - the variable was set in
-no environment - and the measurement below is why it would not have helped where it was aimed:
-headless browsers do not get past a challenge, and a server has no screen. What it could genuinely
-fix is the third row, application shells, which is a real but narrower problem than the code implied.
-
-**Does a real browser solve it?** Measured with Playwright, and the answer depends entirely on
-whether the browser has a screen:
-
-| site | headless | headed |
-|---|---|---|
-| `docs.convex.dev` | 200, 101 links | 200, 101 links |
-| `openai.com` | 403, "Just a moment..." | 200, 458KB, 90 links |
-| `medium.com` | 403, "Attention Required" | 200, 52KB, 22 links |
-| `g2.com` | 403 | 403 |
-
-Headless fixes the JavaScript-rendered pages completely and does nothing at all for the challenges -
-which matters, because a server has no screen. Headed Chrome gets through two of the three, and
-`g2.com` refuses both. So a browser is the answer for row three and not for row two, and the
-remaining options there are a paid unblocking service that maintains browser-identical TLS
-fingerprints, or accepting that a site which went to this trouble does not want to be read by a
-program. Note `openai.com` allows everything in its robots.txt while its edge refuses us: the crawl
-policy and the bot filter are set by different people.
-
-A caution learned the hard way: Cloudflare leaves its scripts in the pages it protects, so
-`crunchbase.com` answers 200 with 128KB of real content and a `challenge-platform` script in it. An
-earlier version of the detector read the body alone and refused two working sites. Body markers now
-only count when the status says we were refused.
-
-### The render that never ran
-
-Rendering was believed to work on the deployment and to fail only for `resy.com`, which was recorded
-here for a fortnight as an unexplained gap. It was neither.
-
-| where | result |
-|---|---|
-| laptop, headless Chromium | resy 222 links, convex 59 |
-| laptop, through the full pipeline | resy 39 rendered, 42 in the file |
-| the Vercel deployment | **0 links, in about three seconds, for every site** |
-
-Three seconds was the finding rather than the zero - a render takes four or more, so nothing was
-being rendered at all - and the conclusion drawn from it was wrong twice over. It was read as *this
-site* being refused, on the evidence that `docs.convex.dev` was stored with 59 links; but the store
-is shared between a laptop and the deployment and records nothing about which wrote a row, so a row
-generated locally was taken as proof that the deployment could render. It could not, for any site.
-
-What it actually was, once `renderPage` was made to report instead of returning `null`:
-
-```
-render https://resy.com/: Cannot find module '/var/task/node_modules/playwright-core/browsers.json'
-```
-
-`serverExternalPackages` stops Next bundling a package. It does not put the package in the function:
-the deployment ships the files its static trace discovered, and neither of these two packages'
-runtime reads are discoverable that way - `playwright-core` opens `browsers.json` by path, and
-`@sparticuz/chromium` reads a compressed browser out of `bin/`. Neither was traced, so Chromium
-never launched, and `catch { return null }` made every attempt look identical to a site that had
-nothing to render. `outputFileTracingIncludes` names the five files explicitly, scoped to
-`/api/generate` so the 66MB browser is not put in the trace of routes that never launch one.
-
-The lesson worth keeping is not about Next's tracing. A capability that reports its failures as
-`null` cannot be debugged from the outside, and the confident diagnosis that filled the silence -
-bot protection, datacentre addresses - was plausible, specific, and about a mechanism that was never
-reached.
-
-### Known limits
-
-**`/w/index.php?title=X` is a program, not a directory.** Stripping `index.php` is right for
-`/docs/index.html` and wrong for a script invocation — it invented an address we had never fetched,
-and Wikipedia came out with both spellings of the same page in one file. The strip now only happens
-when there is no query string.
-
-**A slow site used to outlast the function.** Fixed; see [One clock for the request](#one-clock-for-the-request).
-
-**A link with no note is left without one.** The template's rule is to omit rather than invent. The
-crawl fetches every page it lists, so most links now carry the page's own description; where a site
-sets one boilerplate description for its whole domain, that is detected and dropped rather than
-repeated down the file, and the models fill the gap or nothing does.
-
-A client-rendered page yields nothing, and says so rather than pretending: `docs.convex.dev`
-returns a 4 KB shell with one anchor, and the output states that the links need JavaScript that a
-single fetch does not run. That claim needs positive evidence - a script and an empty element for it
-to mount into. Inferring it from "no links and little text" alone was wrong in both senses: it is
-true of `example.com`, which is a complete page with nothing to link to.
-
-The URL is normalized first (a bare hostname gets `https://`; a non-http scheme is rejected
-rather than defaulted, since prefixing `https://` onto `ftp://example.com` produces
-`https://ftp://example.com`, which `URL` happily parses with the host `ftp`).
-
-Responses are capped at 2 MB and the fetch times out after 15s.
-
-### The one guard
-
-`assertPublicUrl` refuses URLs resolving to a loopback, link-local, private or CGNAT address,
-and re-checks the final URL after redirects.
-
-This is deliberate rather than left over. The endpoint fetches a user-supplied URL server-side
-and returns the body, so without it the deployed app is an open proxy into anything the function
-can reach — `http://169.254.169.254/` (cloud instance metadata) included. A public URL can also
-`302` into the private range, which is why the post-redirect check exists.
-
-Set `ALLOW_PRIVATE_CRAWL_TARGETS=1` to bypass it when testing against a local server.
-
-## Crawling
-
-The generator reads the site, not just the page it was given.
-
-**If the site publishes its own `llms.txt`, that is the answer.** Someone there chose what belonged
-in it, which is more than a crawl can work out. It is checked before anything else, so it costs one
-request rather than fifty: `getlago.com` returns in 0.2s instead of 8.4s. `regenerate: true` asks for
-ours instead.
-
-Recognised by shape - served as text, opening with an H1 - rather than by conformance. Strict
-validation was tried first and rejected almost everything, including getlago's considered file, whose
-prose under a section heading the grammar forbids. Whether it conforms is reported, not used to hide
-it.
-
-**Otherwise it crawls.** Discovery is the sitemap plus the links on the pages themselves, and both
-are needed: `react.dev` answers 404 for `/sitemap.xml`, while `getlago.com` has a 282-URL sitemap
-containing not one `/docs` page.
-
-### The same site gives the same file
-
-The crawl plans before it fetches, and that is what makes the output reproducible.
-
-It used to let the race decide: four workers pulled from a queue until fifty pages came back, so the
-fifty were whichever answered fastest. Two runs against an unchanged site produced different files -
-`vercel.com` and `docs.stripe.com` each drifted by a link, and the page count wobbled between 50 and
-52 because requests already in flight landed after the stop. That makes a content hash worthless for
-noticing real change, and quietly biases the file towards whatever a site serves quickest.
-
-Now selection is a pure function of what the site publishes - its sitemap in file order, and page
-links in document order - ranked by a total order with no ties, one section at a time. Fetching
-happens afterwards and cannot alter the list; results are sorted back into plan order, so a slow
-response changes when a page arrives and never whether it is included.
-
-Discovery still goes deeper than the first page, in waves: each wave is planned from the complete
-result of the one before, so following links stays deterministic. Without that, `react.dev` - which
-publishes no sitemap - would see only the 21 links on its home page instead of 50 pages.
-
-Measured, three runs each: `vercel.com`, `docs.stripe.com`, `getlago.com` and `react.dev` now
-produce byte-identical files. A test does the same against a fixture server that answers with random
-latency, so arrival order differs on every run and the output must not.
-
-What is still not deterministic is honest about itself. A crawl that hits the 25-second safety valve
-is marked `partial` and is not stored, because its contents depend on how fast the network was.
-Failures deliberately do not count as partial: a page failing twice is nearly always a stale sitemap
-entry that fails identically every run - `docs.stripe.com` loses one page and `getlago.com` two, and
-every run still hashes the same.
-
-The pacer belongs to the site rather than to us: it widens its interval on every 429, 503 or doubling
-of latency and never narrows within a crawl. It changes how fast the planned pages are fetched, not
-which they are.
-
-Politeness is not only manners. Measured on `getlago.com`, four workers with a 150ms gap fetched 30
-pages in **2.7s** with a p90 of 306ms; eight workers with no gap took **4.3s** with a p90 of
-**2032ms**. Asking harder made the site slower to answer.
-
-`robots.txt` is fetched and obeyed - 104 URLs skipped on `modal.com` in one crawl.
-
-### What crawling changed
-
-| site | links | links with a real description |
-|---|---|---|
-| getlago.com | 68 -> 82 | 32 -> 70 |
-| docs.stripe.com | 45 -> 52 | 1 -> 30 |
-| modal.com | - -> 67 | - -> 28 |
-
-Measured against files real sites publish (`npm run integration`), reading the site rather than the
-page took the deterministic output from **7.00/15 to 8.00** and its descriptions from 1.91 to 2.64.
-The AI-assisted output moved much less, 8.55 to 8.73 - the sieve had been compensating for the
-missing descriptions and now has better raw material rather than more work to do. Coverage barely
-moved and remains the weak axis: fifty pages is not a whole site.
-
-Those four numbers are the last measurement taken while there were two outputs to compare, kept
-because the comparison is the point. The current figure, one endpoint and a different sample, is
-under [Is the output any good?](#is-the-output-any-good) below.
-
-### Which fifty pages
-
-A budget of fifty against `linear.app`'s thousand candidates is mostly a question of which fifty, and
-until recently the answer was depth, then sitemap position, then **alphabetically** - which is to say
-arbitrarily.
-
-**How often the site links to a page decides.** That is the site voting on what matters, and it needs
-no judgement from us: `react.dev` links `/learn` five times and `/reference/react` and `/blog` four,
-which are exactly its three most important pages. It costs nothing to count and it is deterministic,
-which selection has to be - a model in this path would make two runs of an unchanged site pick
-different pages and rewrite the file forever.
-
-Where the signal is absent it is absent *uniformly*, so it falls through to depth rather than
-misleading. A site whose candidates all come from a sitemap mentions each exactly once.
-
-It grows as the crawl proceeds, because a link from a crawled page counts too:
-
-| site | wave 0 | wave 1 |
-|---|---|---|
-| `modal.com` | 42 candidates, 7 linked more than once | 363 candidates, **171** linked more than once, most-linked 22 times |
-| `docs.convex.dev` | 401 candidates, 59 linked more than once | 356 candidates, **208** linked more than once, most-linked 50 times |
-
-Convex is the case where rendering and ranking compose: it is an application shell, so without a
-browser its home page offers no links at all and every candidate arrives from the sitemap with a
-count of one. Rendering gives the seed its fifty-nine links, and those links are what the ranking
-then has to work with.
-
-**Sections get budget in proportion to their size, with a floor of one.** A turn each was the first
-rule and it treats a section of two hundred documentation pages and one of two careers pages as
-equally important. The floor is what stops a large section starving a small one; where there are more
-sections than budget, the largest are the ones described, because taking one page each from eighty
-sections describes nothing. Allocation is by largest remainder with every tie broken by name, so the
-same site always produces the same quotas.
-
-Measured honestly, the ranking changes 5 of 50 pages on `nytimes.com` and none on a site whose
-budget is filled from a sitemap in a single wave. It is a floor on how arbitrary the selection can
-be rather than a transformation of it.
-
-### Three things testing changed
-
-**Ordering by depth starved the pages worth having.** `getlago.com` keeps its documentation out of
-the sitemap, so shallowest-first spent the budget on `/about-us` and `/blog`. The frontier now gives
-each section a turn.
-
-**The first fallback discarded whole crawls.** It kept whichever of crawl and single page had more
-links, so a home page linking 68 pages beat a crawl of 27 and the crawl was thrown away. Crawling is
-now strictly additive: the home page knows what a site points at, the crawl knows what those pages
-are.
-
-**Template descriptions are worse than none.** Sites set one description for every page - every
-getlago doc claims to be "Developer documentation for Lago's API-first billing platform". A
-description repeated across a fifth of the crawl is dropped, and the home page's specific note kept.
-
-## Narrating the wait
-
-Generating a site synchronously takes a minute or more - a render, a crawl, two model passes - and a
-caller watching a spinner for that long with no idea what it is waiting on reads as broken well
-before it reads as slow.
-
-The request stays synchronous: no queue, no worker, no second place a crawl can run. Moving
-crawling to a background job was built in full once - a `status` column, a GitHub Actions worker, a
-dispatch token - and closed unmerged: fifty pages fits the request budget after "One clock for
-the request" below, so the machinery bought no crawl that could not already be finished, only a
-second place a crawl could happen. What changes here is that the one function doing the work says
-what it is doing, streamed over the same response as it happens, rather than composed after the
-fact from a log line.
-
-Every stage that can report a count does - `crawling` carries `fetched`/`planned`, `annotating`
-carries `completed`/`total` - and every other stage is still a real step the server is doing right
-now, not a guess. `lib/progress.ts` turns a stage into a position on a bar; the weights there
-(`crawling` and `annotating` together are two-thirds of it, because that is where the time actually
-goes) are chosen from what these stages measure at in practice, and the file says plainly that the
-percentage is illustrative rather than a measurement, since fetching one page and annotating fifty
-links are not equal-sized units of anything.
-
-A site that needs no rendering never sees a "rendering" event; one that runs out of time before the
-models never sees "annotating". Skipped stages are simply absent rather than reported as instant, so
-the bar jumps over their share when they do not apply instead of pausing on a step that never ran.
-
-## One clock for the request
-
-Every step had its own timeout and nothing bounded their sum. Each number was defensible alone -
-10s to fetch the page, 5s to look for a published file, 4s for `robots.txt`, 8s for a sitemap, 25s
-of crawling, 35s of models - and together they were roughly twice the sixty seconds a Vercel
-function was then allowed.
-
-So on a slow site the platform killed the process partway through, which is the worst of the
-outcomes available:
-
-- the caller gets Vercel's own timeout page rather than JSON, so the interface can only say
-  *"something went wrong"*;
-- nothing is stored, because the write is the last line of a handler that was never reached;
-- and since nothing is stored, the next attempt starts from the beginning and dies in the same
-  place. **A site slow enough to trip this could never acquire a file at all**, however many times
-  anyone asked.
-
-That last one is why it is a bug rather than a slow path.
-
-`lib/deadline.ts` is one clock, started when the request arrives and passed down. Every network step
-takes the shorter of its own cap and what is left, and the handler returns what it has when the
-clock runs out.
-
-### What actually took seventy seconds
-
-The obvious culprit was the crawl asking the wrong question. It checked *has the budget elapsed*
-before starting a page, so a worker that passed with a tenth of a second to spare still had a full
-page timeout ahead of it. It now asks whether a page can still be started at all, and the page's own
-abort signal is the shorter of its cap and the remainder - so a page begun late is aborted exactly
-on the deadline rather than past it.
-
-That was not the big one. `news.ycombinator.com` asks for a **ten-second crawl delay** in its
-robots.txt, which is honoured; the pacer's queue is shared, so with four workers the fourth worker's
-turn is forty seconds away - and `pacer.wait()` slept for all of it without consulting any budget.
-The retry after a failed page did it a second time. A crawl budgeted at twenty seconds took seventy.
-
-`Pacer.wait()` now takes the deadline and returns false when the turn would arrive too late, so the
-worker stops instead of sleeping. A refused turn does not consume a slot, or the next worker would
-wait for a request that is never sent.
-
-| site | before | after |
-|---|---|---|
-| `news.ycombinator.com` | 71.2s, killed, no file | 28.4s, 4 pages, 23 notes |
-| `airbnb.com` | 27.9s | 37.9s, 47 of 49 pages |
-| `nytimes.com` | 60.9s at the ceiling | 38.0s, 32 pages |
-| `en.wikipedia.org` | 21s | 21.2s, complete |
-
-Hacker News gets four pages because it asked to be crawled once every ten seconds and that is what
-the budget buys. Four pages with real notes is a file; a timeout is not.
-
-**The ceiling moved, and the numbers above are from under the old one.** Vercel's Hobby plan allowed
-sixty seconds when all of this was written, which the project recorded as not negotiable; with fluid
-compute it is 300. `/api/generate` now declares 300 and aims to finish inside 150, and the crawl's
-safety valve went from 25s to 60s - which is what had actually been cutting sites short, since the
-request budget was never the binding limit for a crawl that stopped at its own valve first.
-`resy.com` surfaced it at 32 of 35 pages.
-
-`/api/refresh` keeps its sixty, because the loop that drives it lives in a GitHub runner with six
-hours and calls the endpoint until nothing is due - a longer function would buy it nothing. It does
-now pass its clock down to a regeneration, which it never did: that path was bounded only by the
-crawl's valve, on the assumption the valve was the smaller of the two. It was, at 25s inside 60. It
-is not any more.
-
-### A partial file is stored, without a fingerprint
-
-Refusing to store one was tried and undone: it recreates the dead zone the deadline exists to
-remove, since a site that always runs out of time would always be partial and so would never
-acquire a file. It also puts back the "was the crawl complete" condition that was deliberately
-removed when saving stopped having conditions.
-
-What must not be stored is the **structure hash**. Which pages a truncated crawl holds depends on
-how fast the site was that day, so a fingerprint taken from one would report a change on every
-subsequent check and the site would be rewritten forever. A null hash already means "no baseline" to
-the monitor, which takes a fresh one from its own complete crawl later.
-
-The response carries `partial: true` and the interface says so, with the page counts and a way to
-try again.
-
-## The AI sieve
-
-Two model passes run over every crawl, inside `/api/generate`.
-
-They used to live behind a second endpoint, `/api/enhance`, with the first serving a free
-deterministic file. That is gone: two routes did the same work up to the last step, returned two
-different answers for the same URL, and put a toggle in front of people asking them to choose
-between a good file and a better one. `lib/ai/enhance.ts` is the pass; there is one endpoint.
-
-**Stage one, the guide.** One call carrying the whole skeleton, returning a site summary and a
-better name for each section. This is the global judgment, made once however many links there are.
-
-**Stage two, annotation.** Links are chunked ten at a time *within a section*, four calls in flight,
-each chunk carrying its section name and the stage-one summary. A chunk of links that share a
-subject gets sharper notes than one mixing the API reference with the careers page.
-
-**The sieve is the third stage, and the reason for the name.** The model proposes; deterministic
-code disposes. Every proposal is checked against something already known to be true:
-
-| proposal | accepted only if |
-|---|---|
-| note | it keys a URL we actually extracted, is at most 12 words, and does not restate its title |
-| summary | one sentence, under 200 characters, no URL, not merely the site name again |
-| section name | short, not a locale, not a duplicate of another section |
-| the whole file | it still parses as a conforming llms.txt |
-
-A hallucinated URL cannot enter the file, because notes attach by looking the URL up among the links
-already extracted - an invented one has nowhere to land. Every slot the model fills is optional in
-the spec, so rejecting is always safe: a dropped note leaves a link without one, which is a poorer
-file and still a valid one.
-
-The endpoint reports what survived (`notesAccepted`, `notesRejected`, `sectionsRenamed`,
-`chunksFailed`), so a model that is quietly doing nothing is visible rather than inferred. The
-interface says it in words: *"44 notes, 3 sections renamed"*, not *"AI enabled"*.
-
-With no `OPENROUTER_API_KEY` the passes are skipped and the deterministic file is served, which is
-also what happens when the models return nothing usable.
-
-### When a call fails
-
-Failures are told apart rather than counted together, because they call for different things:
-
-| kind | what it is | what happens |
-|---|---|---|
-| `rate-limited` | 429, from the platform or every provider at capacity | up to 3 attempts, honouring `Retry-After` |
-| `upstream` | 5xx | up to 3 attempts |
-| `credits` | 402, the account cannot pay | stops immediately, endpoint answers 503 |
-| `auth` | 401/403, key missing or rejected | stops immediately, endpoint answers 503 |
-| `timeout` | our own deadline | not retried; those links keep no note |
-| `unparseable` | a reply that is not usable JSON | not retried - temperature is 0, so it would repeat |
-
-Backoff is exponential with full jitter. The jitter is the point rather than a refinement: chunks
-are dispatched together, so they meet a rate limit together, and a fixed delay would send the whole
-batch back in step and reproduce the burst that caused it.
-
-An empty account is the case worth separating. It fails every chunk identically, so the run stops at
-the first 402 rather than proving it a dozen more times, and the endpoint returns **503 with a
-reason** instead of 200 and a quietly thinner file - that is the one failure an operator has to act
-on, and it should not look like a slow model.
-
-### Choosing the models
-
-`npm run bench` measures the candidates on these two jobs. Not part of `npm test`: it needs a key
-and a network, and its numbers move with whatever the providers are doing.
-
-| model | chunk (median of 3) | guide | $/M in -> out |
-|---|---|---|---|
-| `gemini-3.5-flash-lite` | **1.28s** (1.3/1.3/1.2) | **0.67s** | 0.30 -> 2.50 |
-| `gemma-4-31b-it` | 2.37s (2.2/2.4/3.3) | 1.78s | 0.09 -> 0.34 |
-| `gpt-oss-120b` | 3.20s (**49.6**/3.2/0.9) | 2.01s | 0.037 -> 0.17 |
-| `deepseek-v4-flash` | 7.32s | 9.73s | 0.089 -> 0.177 |
-
-All four return valid JSON, and all four reached the same judgment on the guide task - so the choice
-is latency and cost, not capability. Gemini guides because its variance is near zero; Gemma works
-the chunks because its output is a third the price and that is what multiplies. `gpt-oss-120b`
-spends reasoning tokens on trivial work and produced a 49.6-second outlier annotating eight links;
-`reasoning: {enabled: false}` is rejected outright and low effort does not fix the tail.
-
-Measured end to end: 8-14 seconds a site, every note accepted, roughly a quarter of a cent.
-
-### Is the output any good?
-
-`npm run integration` answers that against sites which publish their own `llms.txt`. Those files are
-the ground truth this project otherwise lacks: a human, or a documentation platform, decided what
-belonged in them. Sampling from [llmstxt.site](https://llmstxt.site) gives real pages, chosen by
-someone other than us, with an answer key attached.
-
-Eight sites, seed 90210, judged by `nova-micro-v1`:
-
-| coverage | descriptions | structure | total |
-|---|---|---|---|
-| 2.13 | 3.44 | 3.13 | **8.69** / 15 |
-
-All eight conformed to the grammar. Median time to generate was 26 seconds.
-
-**Coverage is the weak axis and the honest one.** The reference describes a whole site; we crawl
-fifty pages. Nothing in the pipeline yet asks which fifty *matter* - within a section the plan
-orders by depth, then sitemap position, then alphabetically - so on a large site the budget is spent
-arbitrarily rather than badly. That is the next thing worth building, and it is why descriptions and
-structure score a point and a half higher than coverage does.
-
-**The error bar is measured rather than assumed.** This used to grade two candidates - a free
-deterministic file and the AI-assisted one - and the number that mattered was the gap between them.
-With one endpoint there is one candidate, so instead every file is graded twice by the same judge at
-temperature 0, and the disagreement between those gradings is the noise floor: **0.63 / 15**. Any
-change smaller than that means nothing.
-
-**Choosing a judge is not about price.** Candidates were tested on one good and one deliberately poor
-file for the same reference, keeping whichever separated them furthest:
-
-| judge | good | bad | gap | speed | cost/1k |
-|---|---|---|---|---|---|
-| `nova-micro-v1` | 13/15 | 3/15 | **10** | 0.8s | $0.032 |
-| `gpt-oss-20b` | 12/15 | 3/15 | 9 | 6.5s | $0.071 |
-| `granite-4.0-h-micro` | 12/15 | 4/15 | 8 | 2.7s | $0.018 |
-| `mistral-nemo` | 13/15 | 9/15 | 4 | 3.7s | $0.013 |
-
-`mistral-nemo` is the cheapest and useless here: it gave a file with no descriptions and no real
-sections 9 out of 15. `qwen3.7-flash` and `ling-3.0-flash` returned nothing at all - both are
-reasoning models that spend the entire token budget thinking and answer with empty content.
-
-## Generating and reading
-
-**Generating requires an account.** It crawls someone else's site and spends money on models, so it
-is not something to leave open to the internet. `POST /api/generate` is the only way to make a file,
-and it always crawls, always runs the models, and always saves what it produced.
-
-**Reading needs no account.** `GET /api/saved` lists what has been generated; `GET /api/saved?url=...`
-returns one file. Those files describe public pages and were built from public pages, so there is
-nothing in them to protect. The home page shows the list to anyone.
-
-**Saving has no conditions.** If a signed-in person generates a site, the result is kept. An earlier
-version weighed four of them - was the crawl complete, did the models help, does it conform, is a
-store configured - and the effect was that a file could quietly fail to be kept for reasons nobody
-could see from outside. Requiring an account is what keeps the table honest; nothing else needs
-guarding.
-
-It is not a cache and has no expiry. A saved file is what that site's llms.txt *is*, until something
-replaces it: a person asking for a fresh one, or the scheduled check noticing the site moved.
-
-The table is [`db/schema.sql`](db/schema.sql): the four original columns, the seven the monitor
-added, and `source`/`published_at` for telling a site's own file from ours. It is idempotent, so it
-doubles as the migration for a deployment that predates either change.
-
-`lib/store.ts` used to tolerate an older schema, falling back to the original four columns when
-PostgREST reported one it did not know - selecting a missing column returns *nothing at all* rather
-than a partial row, which emptied the saved list the first time this was deployed ahead of its
-migration. That was worth having while the schema lived only in someone's memory. Now that the file
-above is the record, the fallback defended a state that no longer occurs and would hide a real
-misconfiguration behind a silently partial row, so it is gone. **Run `db/schema.sql` before the
-first deploy.**
-
-RLS is enabled with **no policies at all**, so the publishable key can neither read nor write:
-verified against the live project, a browser-key read returns zero rows and a browser-key insert is
-refused with *"new row violates row-level security policy"*. Everything goes through the server using
-`SUPABASE_SECRET_KEY`, which bypasses RLS and never leaves it.
-
-A site that publishes its own llms.txt is saved too, with `source: "published"` and the address it
-was read from. Marked rather than merged: the saved list says which files this project wrote and
-which it merely found, and the scheduled check knows to re-read their file rather than crawl the
-site and replace someone's curation with our guess.
+`POST /api/generate` takes `{ "url": "example.com", "regenerate": false }` and answers in one of two
+shapes, told apart by content type. A request with **nothing to do** — a saved file already answers
+it — is a single `application/json` object. A request that **commits to real work** streams
+`application/x-ndjson`, one object per line, as each stage starts and each page or chunk settles,
+ending in a line carrying the result. The HTTP status is always 200 once a stream has started, so
+the result line carries the status it would have had.
+
+`GET /api/saved` returns the catalog, or one file, and needs no account.
+`POST /api/refresh` is cron-authenticated and re-checks whatever is due.
+
+## The parts worth knowing about
+
+**It conforms to the spec, and proves it.** `lib/spec.ts` implements the
+[llmstxt.org](https://llmstxt.org) grammar in both directions — escaping on the way out, parsing to
+check on the way back — and every response reports the result. The suite includes the spec's own
+example, seven files that must be rejected, and eight hostile pages run through the real pipeline.
+
+**A site's own file wins.** If the site publishes an `llms.txt`, that is the answer: it is stored
+and labelled as theirs, and the scheduled check re-reads it rather than crawling and replacing
+someone's curation with ours.
+
+**The crawl is deterministic.** Pages are planned before anything is fetched and results sorted back
+into plan order, so the same site yields byte-identical output — which is what lets a content hash
+mean "the site changed" rather than "a packet was slow".
+
+**Pages are ranked, not taken alphabetically.** How often a site links to a page decides which
+candidates are crawled, because that is the site voting on what matters and it costs nothing to
+count. Sections get budget in proportion to their size, so two hundred documentation pages and two
+careers pages are not treated as equally important.
+
+**One link means one page.** URLs are canonicalised — fragments, trailing slashes, tracking
+parameters, `index.html` — and titles compared by stemmed token overlap. Query strings are kept when
+they name a page (`?title=X`) and dropped when they name a campaign. Operations on a page
+(`?action=edit`, `?printable=yes`) are not pages and are dropped.
+
+**Sections come from the site's own structure.** Links group by shared path segment, going a segment
+deeper when one bucket would swallow the page; names come from the site's nav headings where one
+covers the group. Capped at 25 links a section and 150 overall, because a sitemap is the thing
+llms.txt exists not to be.
+
+**Sites that need a browser get one.** When a fetch finds no links, Chromium runs in the function.
+`resy.com` and `docs.convex.dev` return application shells and embed nothing a parser could use;
+rendered, they are ordinary sites.
+
+**Politeness is measured, not assumed.** The pacer widens on a 429, a 503, or a site simply getting
+slower, and never narrows again within a crawl. On `getlago.com`, four workers at a 150ms gap fetched
+30 pages in 2.7s where eight workers with no gap took 4.3s — asking harder made the site slower to
+answer.
+
+**One clock bounds the request.** Every step used to have its own timeout and nothing bounded their
+sum, so a slow site ran past the function's limit and returned nothing, stored nothing, and left the
+next attempt to die identically. `lib/deadline.ts` starts when the request arrives and every step
+takes the shorter of its own cap and what remains.
+
+**The wait is narrated.** Fetching, rendering, crawling with a page count, then the two model
+passes — streamed as they happen rather than spent in silence.
+
+**The models are on a leash.** A guide pass writes the summary and section names, a chunked pass
+writes per-link notes, and a sieve drops anything a model invented. If the result would be worse or
+invalid, the deterministic file is served instead. Model failures are told apart: retry with
+jittered backoff on 429s and 5xx honouring `Retry-After`, stop immediately on 401/402.
+
+**Refusals are told apart from emptiness.** A 403, an anti-bot challenge, and an application shell
+need three different answers, and the output says which rather than describing Cloudflare's
+verification page as though it were the site.
 
 ## Keeping it up to date
 
-A file that was right when it was generated is wrong the moment the site is reorganised, so stored
-sites are re-checked on a schedule and the ones that moved are rewritten.
-
-**Work is done cheapest first**, because most checks find nothing:
+Every stored site is re-checked every six hours, and work is done cheapest first because most checks
+find nothing:
 
 | tier | cost | what it settles |
 |---|---|---|
@@ -780,125 +199,31 @@ sites are re-checked on a schedule and the ones that moved are rewritten.
 | a crawl, fingerprinted without any model | ~9s | did the structure change |
 | regenerate | ~30s | write the new file |
 
-A tier only runs when the one above it was inconclusive. A sitemap that has not moved settles a site
-in about half a second, which is what makes checking hundreds of sites affordable.
+A tier only runs when the one above it was inconclusive. The comparison is a `structure_hash` — the
+URLs and titles a deterministic crawl finds, with no model involved — because the file we serve is
+AI-assisted and a change in *its* hash proves nothing about the site.
 
-**Every site is checked every six hours** (`MONITOR_INTERVAL_HOURS`). One number, the same for all
-of them, so the guarantee can be stated without reading any code: nothing here is ever more than six
-hours behind the site it describes.
-
-Each row used to carry its own interval, halving on a change and growing by half without one, out to
-a weekly ceiling. It adapted the cheap half of the system — a check is usually one request, and the
-expensive half is already gated on evidence that something moved — so what the backoff actually
-bought was up to seven days of a file being wrong about a site that had changed, which is the one
-thing this tool exists not to do. Four checks a day per site is, at four hundred sites, sixteen
-hundred mostly-single-request checks spread across a day; the budget does not notice.
-
-A row that has never been fingerprinted records its first one as a *baseline* rather than a change,
-so a pre-existing row is not reported as having moved the first time it is looked at.
-
-**The loop lives in GitHub Actions, the crawling lives on Vercel.** `.github/workflows/monitor.yml`
-calls `POST /api/refresh` until it reports nothing left due. A serverless function on this plan is
-killed at 60 seconds, so one call can only handle a slice of the queue; the runner has six hours.
-The crawling deliberately stays on the deployment - that is where the credentials already are, and
-requests from a shared CI address are far more likely to meet an anti-bot challenge than requests
-from the app's own host.
-
-To set it up, add two repository secrets:
+`.github/workflows/monitor.yml` calls `POST /api/refresh` every fifteen minutes until nothing is due.
+The loop lives in the runner, which has six hours, while the crawling stays on the deployment, where
+the credentials already are and where requests come from the app's own address rather than a shared
+CI one. To set it up, add two repository secrets:
 
 ```
 APP_URL       https://your-deployment.vercel.app
 CRON_SECRET   the same value as the deployment's CRON_SECRET (openssl rand -hex 32)
 ```
 
-`/api/refresh` compares the bearer token in constant time and answers 401 without one. Run it by
-hand from the Actions tab (`workflow_dispatch`) rather than waiting for the schedule.
-
-**The schedule is a ceiling, not a promise.** The cron reads `7,22,37,52` - every fifteen minutes,
-offset off the hour because GitHub documents that scheduled events are delayed under load and that
-"high load times include the start of every hour". This is not how often a site is checked, which is
-the six hours above; it is how precisely a site that has become due gets picked up, and fifteen
-minutes of slack on six hours is four percent. In practice a low-activity repository sees far fewer:
-this one has been running roughly every four hours, which is the real limit on the six-hour
-promise - the interval says when a site *becomes* due, and GitHub decides when anything asks. GitHub also disables schedules on repositories
-with no activity for 60 days, without saying so. Anything that has to be reliable belongs on a real
-scheduler; this is the free one.
-
-**A run is bounded by expense, not by a count of sites.** `MONITOR_CHECKS_PER_RUN` (40) and
-`MONITOR_REGENERATIONS_PER_RUN` (2) are separate because the two cost two orders of magnitude apart,
-and a run declines to *begin* a regeneration it has not the time to finish - the first live run took
-69 seconds and would have been killed mid-write. A regeneration that gets deferred deliberately does
-not record the new sitemap fingerprint: recording it would make the next run's cheap tier say
-"unchanged" and the change would be lost.
-
-**A partial crawl is never recorded.** One cut short by its safety valve depends on how fast the
-network was, and comparing against it would report a change every run.
-
-## Accounts
-
-Sign-in is email and password, through Supabase. Two details differ from every Supabase guide you
-will find, because this is Next 16:
-
-- Session refresh lives in **`proxy.ts`**, not `middleware.ts`. The middleware convention is
-  deprecated and renamed in Next 16.
-- `cookies()` is **async**, so the server client is async too.
-
-The session is verified with `getUser()` rather than read from `getSession()`. getSession trusts the
-cookie; getUser checks the token with Supabase. For deciding whether to spend money on a crawl and
-two model passes, the cookie's own claim is not good enough - and the difference is not theoretical:
-altering the last six characters of a real token is refused by one and accepted by the other.
-
-With the Supabase variables unset the app still runs and still reads: the saved list and every saved
-file are served as normal, and generating answers 503 rather than 401, since the caller did nothing
-wrong and there is no account for them to sign in to.
-
 ## Tests
 
 ```bash
-npm test          # 171 tests, node --test, no framework and no dependencies
+npm test          # 216 tests, node --test, no framework and no dependencies
 npm run lint
 npm run typecheck
 ```
 
 All three run in CI on every pull request. Two more need a key and a network, so they do not:
-`npm run bench` times the candidate models, and `npm run integration` grades the output against
-sites that publish their own file (it needs `npm run dev` in another terminal and the
-`TEST_ACCOUNT_*` credentials, since generating is gated).
-
-Node 24 runs TypeScript directly, so the suites are `.ts` and import the modules they test. That is
-why `lib` modules import each other by full filename (`./dom.ts`) and why type-only imports carry an
-inline `type` marker: Node strips types when it runs a file and cannot otherwise tell an interface
-from a value.
-
-`tests/fixtures.ts` holds mock pages, one per genre the extractor actually meets - a documentation
-site with a sidebar and cards, a marketing site reaching one page by four URLs, an application
-shell, locale-prefixed paths, a chrome-heavy page, and deliberately malformed markup. Several encode
-a specific bug found against live sites, so a regression has somewhere to fail loudly.
-
-**The routes are tested as functions.** `tests/routes.test.ts` calls each handler with a `Request`
-and stubs the two things a unit test must not reach - the network and the store - so what is
-asserted is the handler's own decisions: the gate refusing a signed-out caller *before* the fetch
-(a stub that throws on any request is what proves the order), a stored file served without
-crawling, `regenerate` skipping it, a site's own llms.txt saved as theirs rather than as ours, and
-`/api/refresh` answering 401 to a token of the wrong length rather than letting `timingSafeEqual`
-throw.
-
-Two things had to give way for that. `lib/monitor.ts` gained `RunBudget`, which was arithmetic
-closed over two mutable counters inside the refresh loop - the one part of monitoring most worth
-testing and the one part that could not be. And `tests/setup.mjs` registers a resolve hook, because
-route handlers import through the `@/` alias (a tsconfig `paths` entry Next resolves at build time
-and Node knows nothing about) and import `next/server` (a package with no `exports` map, so Node
-will not guess the `.js`). Both are resolution problems rather than behaviour, so they are fixed in
-the runner rather than by contorting the routes to suit it.
-
-The tests were checked by breaking the code: moving the auth gate after the fetch, ignoring
-`regenerate`, mislabelling a published file as generated, and removing the length guard before
-`timingSafeEqual` each fail exactly one test.
-
-Writing them found five real defects: `<p>` inside a `<div>` closed the `<div>` (the implicit-close
-table was keyed backwards), `stem("guides")` did not match `stem("guide")`, `stripBrandSuffix` left
-a two-word brand in place, deduping a link kept the nav copy and threw away the card's description,
-and a card description was repeated as orienting prose.
+`npm run bench` times the candidate models, and `npm run integration` grades the output against sites
+that publish their own file.
 
 ## Environment
 
@@ -918,45 +243,28 @@ documented in `.env.example` beside the reasoning for each.
 
 ## Deployment
 
-Deployed to Vercel as a standard Next.js app, from GitHub rather than from a laptop.
+Deployed to Vercel as a standard Next.js app, from GitHub rather than from a laptop. Work reaches
+`main` through a pull request; opening one runs CI and builds a preview, and merging deploys.
 
-Work goes to `main` through a pull request. Opening one runs CI (lint and typecheck, in
-`.github/workflows/ci.yml`) and builds a Vercel preview, whose URL is commented on the PR.
-Merging deploys to production.
+**CI gates the deploy, not just the merge.** Branch protection stops a red pull request being merged,
+which sounds like enough and is not: Vercel builds on every push to main, starting the moment the
+push lands — in parallel with that commit's CI run rather than after it. `scripts/gate-deploy.mjs`
+runs as Vercel's Ignored Build Step, waits for the `ci` check on the exact commit, and skips the
+build unless it passed. It needs no credentials, because the repository is public.
 
-`main` is protected: it takes a passing `ci` check and a PR to change it.
+Two things about it are easy to get backwards. **The exit codes are inverted** — Vercel asks whether
+the build should be *ignored*, so 0 skips and 1 builds. And **anything it cannot resolve fails
+closed**: deploying because we could not find out whether the tests passed would make the gate
+decoration.
 
-**CI gates the deploy, not just the merge.** Branch protection stops a red pull request being
-merged, which sounds like enough and is not: Vercel's Git integration builds on every push to main,
-and it starts the moment the push lands - in parallel with that commit's CI run, not after it. A
-merge whose checks go red on main, an admin pushing directly, or a green PR that conflicts
-semantically with something merged a minute earlier all reach production without anything having
-agreed they should.
-
-`scripts/gate-deploy.mjs` runs as Vercel's Ignored Build Step (`vercel.json`). It waits for the `ci`
-check on the exact commit being deployed and skips the build if it did not pass, so production keeps
-the last good version instead of taking a broken one.
-
-It needs no credentials: the repository is public, so GitHub serves check runs for a commit to
-anyone who asks.
-
-Two things about it are deliberate and easy to get backwards. **The exit codes are inverted** -
-Vercel asks whether the build should be *ignored*, so 0 skips and 1 builds. And **anything it cannot
-resolve fails closed**: an unreachable GitHub, a check that never appears, a run still going after
-eight minutes all skip the deploy. Deploying because we could not find out whether the tests passed
-would make the gate decoration, and what a gate does when it cannot tell is the whole of its value.
-
-Previews are never gated. They are how a change is looked at before it is merged, and waiting for CI
-to see the thing CI is testing helps nobody.
-
-CI pins Node 24, and pins npm to the exact version that writes `package-lock.json`. npm decides how
-the wasm fallback dependencies are laid out in the lock file, and `npm ci` rejects a layout it would
-not have written. Pinning Node alone is not enough, because its bundled npm moves with patch
-releases - a lock written by 11.6.2 met a runner carrying 11.19.1 and the install failed. Regenerate
-the lock with `npx npm@11.19.1 install`, matching the version in `ci.yml`.
+CI pins Node 24 and pins npm to the exact version that writes `package-lock.json`, because `npm ci`
+rejects a lock layout it would not have written itself. Regenerate the lock with
+`npx npm@11.19.1 install`, matching `ci.yml`.
 
 ## Reading the history
 
-`SEQUENCE.md` lists what was built in what order and why, one entry per merged PR. It is the
-narrative the commit log cannot carry - including the two decisions that were made and then reversed
-after testing failed to support them.
+[`SEQUENCE.md`](SEQUENCE.md) is the long version: every step in the order it was built, with the
+measurement behind each decision — including the things that were tried and removed. A
+browser-identity retry that could not be shown to work, a background crawl queue that bought nothing,
+an adaptive check interval that throttled the cheap half of the system. The commit messages carry the
+same reasoning at a finer grain.
