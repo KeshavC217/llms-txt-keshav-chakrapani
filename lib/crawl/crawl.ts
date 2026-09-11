@@ -43,8 +43,14 @@ const MAX_PAGES = Number(process.env.CRAWL_MAX_PAGES ?? 50);
  * forever. The last PAGE_TIMEOUT_MS of it is unusable by design - a worker
  * will not start a page it cannot finish - so the valve has to be the time
  * worth spending plus that reserve.
+ *
+ * Twenty-five was sized against a fifty-second request, and it - not the
+ * request - is what cut resy.com off at 32 of 35 pages. Sixty is the time a
+ * full fifty-page crawl actually wants at four workers and a second a page,
+ * and every caller that has a clock still gets whichever expires first, so a
+ * crawl inside a shorter budget is squeezed exactly as it was.
  */
-const TIME_BUDGET_MS = Number(process.env.CRAWL_TIME_BUDGET_MS ?? 25_000);
+const TIME_BUDGET_MS = Number(process.env.CRAWL_TIME_BUDGET_MS ?? 60_000);
 const CONCURRENCY = Number(process.env.CRAWL_CONCURRENCY ?? 4);
 const PAGE_TIMEOUT_MS = 8_000;
 

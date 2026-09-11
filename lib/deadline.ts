@@ -71,10 +71,23 @@ export class Deadline {
 /**
  * How long the whole of `POST /api/generate` may take.
  *
- * Ten seconds under the function's own sixty. The margin is for the things
- * this clock cannot see: a cold start before the handler runs, and serialising
- * a file that can be tens of kilobytes after it returns. A deadline that let
- * the request run to 59.9s would still be killed by the platform, and killed
- * is the one outcome worth this much trouble to avoid.
+ * This was fifty seconds, ten under a function ceiling of sixty that the
+ * project recorded as "not negotiable". It is not sixty any more: Vercel's
+ * duration limits now put Hobby at 300s by default with fluid compute, so the
+ * constraint the whole design was folded around had quietly gone away. resy.com
+ * is what surfaced it - 32 of 35 pages, cut off mid-crawl.
+ *
+ * Not 290, though. The budget is sized to the work rather than to the ceiling:
+ * a fifty-page crawl at about a second a page, a render of up to 25s, and two
+ * model passes come to roughly a hundred seconds at the worst, so 150 leaves
+ * half as much again in hand. The rest of the platform's allowance stays as
+ * headroom rather than as permission to keep somebody waiting five minutes,
+ * and the ceiling in the route is what stops a runaway request instead.
+ *
+ * The margin between this and the route's maxDuration covers what this clock
+ * cannot see: a cold start before the handler runs, and serialising a file
+ * that can be tens of kilobytes after it returns. Being killed by the platform
+ * remains the one outcome worth this much trouble to avoid, because it stores
+ * nothing and leaves the next attempt to die identically.
  */
-export const REQUEST_BUDGET_MS = 50_000;
+export const REQUEST_BUDGET_MS = Number(process.env.REQUEST_BUDGET_MS ?? 150_000);
