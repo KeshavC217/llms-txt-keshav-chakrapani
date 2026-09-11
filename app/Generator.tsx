@@ -14,6 +14,7 @@ interface Result {
   /** The clock ran out mid-crawl, so this is what was read rather than all of it. */
   partial?: boolean;
   generatedAt?: string;
+  lastCheckedAt?: string | null;
   source?: "published";
   publishedAt?: string;
   crawl?: { pages: number; planned: number; failed: number; partial: boolean };
@@ -26,7 +27,10 @@ type StreamedLine = ({ type: "progress" } & ProgressEvent) | ({ type: "result" }
 
 export interface SavedSite {
   url: string;
+  /** When the file was last written, which is not the same as how current it is. */
   generatedAt: string;
+  /** When the site was last looked at, whether or not it had moved. */
+  lastCheckedAt?: string | null;
   changedAt?: string | null;
   /** "published" means the site wrote it; "generated" means this project did. */
   source: string;
@@ -40,6 +44,29 @@ function age(iso: string): string {
 
   const hours = Math.round(minutes / 60);
   return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}
+
+/**
+ * How current a stored file is, which is when the site was last looked at -
+ * not when the file was last written.
+ *
+ * A site that has not moved keeps the text it already had, so generated_at
+ * stops advancing and a file the scheduled check confirmed ten minutes ago
+ * reads as three weeks old. What a reader wants from this line is "up to date
+ * as of", and that is last_checked_at, whether or not the check found
+ * anything to rewrite. Rows written before the monitoring columns existed have
+ * no check to report, so those fall back to when they were generated.
+ */
+function refreshed(site: { generatedAt: string; lastCheckedAt?: string | null }): string {
+  return age(site.lastCheckedAt ?? site.generatedAt);
+}
+
+/** The exact dates, on hover, since the line itself is deliberately rough. */
+function freshnessDetail(site: { generatedAt: string; lastCheckedAt?: string | null }): string {
+  const written = `File written ${new Date(site.generatedAt).toLocaleString()}`;
+  if (!site.lastCheckedAt) return written;
+
+  return `Site last checked ${new Date(site.lastCheckedAt).toLocaleString()}\n${written}`;
 }
 
 /** Says what the models changed, rather than that they ran. */
@@ -281,7 +308,11 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
               {result.crawl && <> · {result.crawl.pages} pages crawled</>}
               {result.report && <> · {describeReport(result.report)}</>}
               {result.saved && result.generatedAt && (
-                <> · {result.source === "published" ? "read" : "generated"} {age(result.generatedAt)}</>
+                <span title={freshnessDetail({ generatedAt: result.generatedAt, lastCheckedAt: result.lastCheckedAt })}>
+                  {" · "}
+                  {result.source === "published" ? "site's own" : "generated"} · refreshed{" "}
+                  {refreshed({ generatedAt: result.generatedAt, lastCheckedAt: result.lastCheckedAt })}
+                </span>
               )}
               {result.stored && <> · saved</>}
               {result.spec && (
@@ -329,9 +360,8 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
                 <button type="button" onClick={() => void open(site.url)} className="truncate text-left underline">
                   {site.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
                 </button>
-                <span className="shrink-0 text-neutral-500">
-                  {site.source === "published" ? "site's own" : "generated"} · {age(site.generatedAt)}
-                  {site.changedAt ? " · updated since" : ""}
+                <span className="shrink-0 text-neutral-500" title={freshnessDetail(site)}>
+                  {site.source === "published" ? "site's own" : "generated"} · refreshed {refreshed(site)}
                 </span>
               </li>
             ))}

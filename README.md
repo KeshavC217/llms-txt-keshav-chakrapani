@@ -84,6 +84,7 @@ object, exactly as it always was:
   "llmsTxt": "# Example\n\n> ...\n\n## Docs\n\n- [Quickstart](...): ...\n",
   "saved": true,
   "generatedAt": "2026-09-10T12:00:00.000Z",
+  "lastCheckedAt": "2026-09-10T12:00:00.000Z",
   "spec": { "valid": true, "issues": [] }
 }
 ```

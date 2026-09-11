@@ -82,6 +82,9 @@ export async function POST(request: Request) {
         source: saved.source,
         publishedAt: saved.publishedAt,
         generatedAt: saved.generatedAt,
+        // How current the file is, which is the last check rather than the
+        // last rewrite; an unchanged site keeps both its text and its date.
+        lastCheckedAt: saved.lastCheckedAt,
         spec: { valid: validateLlmsTxt(saved.llmsTxt).length === 0, issues: [] },
       });
     }
