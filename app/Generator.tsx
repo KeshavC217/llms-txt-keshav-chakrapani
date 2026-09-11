@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
+import { displayUrl, matchesAddress } from "@/lib/catalog";
 import { describeProgress, type ProgressEvent } from "@/lib/progress";
 
 interface Result {
@@ -86,6 +87,19 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
+  const [tab, setTab] = useState<"generate" | "catalog">("generate");
+  const [query, setQuery] = useState("");
+
+  /*
+   * Filtering happens here rather than on the server: the list is already in
+   * the page, fifty rows of it, so a keystroke costs nothing and a round trip
+   * would cost a visible pause. It matches the address as displayed - no
+   * scheme, no trailing slash - because that is what someone is looking at
+   * when they type, and "docs.c" should find docs.convex.dev.
+   */
+  const matched = useMemo(() => {
+    return query.trim() ? saved.filter((site) => matchesAddress(site.url, query)) : saved;
+  }, [saved, query]);
 
   /**
    * Reads /api/generate's streamed body as it arrives - one JSON object per
@@ -173,6 +187,10 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
 
   /** Reading a saved file needs no account, so it does not go through /api/generate. */
   async function open(target: string) {
+    // The file appears where files appear. Reading one from the catalog is
+    // still "here is a file", so it lands on the same panel a fresh
+    // generation would, with the address filled in so Regenerate means this.
+    setTab("generate");
     setLoading(true);
     setError(null);
     setResult(null);
@@ -208,166 +226,224 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
         been generated does not.
       </p>
 
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          void run(url, false);
-        }}
-        className="mt-8 flex gap-3"
+      <nav
+        role="tablist"
+        aria-label="Sections"
+        className="mt-8 flex gap-1 border-b border-neutral-200 dark:border-neutral-800"
       >
-        <input
-          type="text"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="example.com"
-          className="flex-1 rounded-lg border border-neutral-300 px-4 py-3 outline-none focus:border-neutral-500 dark:border-neutral-700"
-        />
-        <button
-          type="submit"
-          disabled={loading || !url.trim() || !signedIn}
-          title={signedIn ? undefined : "Sign in to generate"}
-          className="rounded-lg bg-neutral-900 px-6 py-3 font-medium text-white disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900"
+        {(
+          [
+            ["generate", "Generate"],
+            ["catalog", saved.length > 0 ? `Catalog (${saved.length})` : "Catalog"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            onClick={() => setTab(id)}
+            className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+              tab === id
+                ? "border-neutral-900 text-neutral-900 dark:border-neutral-100 dark:text-neutral-100"
+                : "border-transparent text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-300"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      <div role="tabpanel" hidden={tab !== "generate"}>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void run(url, false);
+          }}
+          className="mt-8 flex gap-3"
         >
-          {loading ? "Working…" : "Generate"}
-        </button>
-      </form>
+          <input
+            type="text"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="example.com"
+            className="flex-1 rounded-lg border border-neutral-300 px-4 py-3 outline-none focus:border-neutral-500 dark:border-neutral-700"
+          />
+          <button
+            type="submit"
+            disabled={loading || !url.trim() || !signedIn}
+            title={signedIn ? undefined : "Sign in to generate"}
+            className="rounded-lg bg-neutral-900 px-6 py-3 font-medium text-white disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900"
+          >
+            {loading ? "Working…" : "Generate"}
+          </button>
+        </form>
 
-      {loading && (
-        <div className="mt-6" aria-live="polite">
-          {/*
-            React batches setResult/setError with the setLoading(false) that
-            follows them, so this never renders mid-transition to "done" - the
-            bar is simply replaced by the result or the error on the next
-            frame, rather than flashing a completed state of its own.
-          */}
-          {(() => {
-            const { percent, label } = progress ? describeProgress(progress) : { percent: 0, label: "Starting…" };
-            return (
-              <>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
-                  <div
-                    className="h-full rounded-full bg-neutral-900 transition-[width] duration-300 ease-out dark:bg-neutral-100"
-                    style={{ width: `${percent}%` }}
-                  />
-                </div>
-                <p className="mt-2 text-sm text-neutral-500">{label}</p>
-              </>
-            );
-          })()}
-        </div>
-      )}
-
-      {!signedIn && (
-        <p className="mt-3 text-sm text-neutral-500">
-          <Link href="/login" className="underline">
-            Sign in
-          </Link>{" "}
-          to generate a new one. Anything already generated is below.
-        </p>
-      )}
-
-      {error && (
-        <p className="mt-6 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
-          {error}
-        </p>
-      )}
-
-      {result?.partial && (
-        <div className="mt-6 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-          This site was slow enough that time ran out mid-crawl, so this covers{" "}
-          {result.crawl ? `${result.crawl.pages} of ${result.crawl.planned} pages` : "part of the site"} rather than all
-          of it.{" "}
-          {signedIn && (
-            <button type="button" className="underline" onClick={() => void run(result.url, true)}>
-              Try again
-            </button>
-          )}
-        </div>
-      )}
-
-      {result?.source === "published" && (
-        <div className="mt-6 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:bg-blue-950 dark:text-blue-300">
-          This is the site&apos;s own llms.txt, from{" "}
-          <a href={result.publishedAt} className="underline">
-            {result.publishedAt}
-          </a>
-          . Someone there chose what belonged in it.{" "}
-          {signedIn && (
-            <button type="button" className="underline" onClick={() => void run(url, true)}>
-              Generate one anyway
-            </button>
-          )}
-        </div>
-      )}
-
-      {result && (
-        <section className="mt-8">
-          <div className="flex items-center justify-between gap-4">
-            <p className="text-sm text-neutral-500">
-              {result.llmsTxt.length.toLocaleString()} chars
-              {result.crawl && <> · {result.crawl.pages} pages crawled</>}
-              {result.report && <> · {describeReport(result.report)}</>}
-              {result.saved && result.generatedAt && (
-                <span title={freshnessDetail({ generatedAt: result.generatedAt, lastCheckedAt: result.lastCheckedAt })}>
-                  {" · "}
-                  {result.source === "published" ? "site's own" : "generated"} · refreshed{" "}
-                  {refreshed({ generatedAt: result.generatedAt, lastCheckedAt: result.lastCheckedAt })}
-                </span>
-              )}
-              {result.stored && <> · saved</>}
-              {result.spec && (
+        {loading && (
+          <div className="mt-6" aria-live="polite">
+            {/*
+              React batches setResult/setError with the setLoading(false) that
+              follows them, so this never renders mid-transition to "done" - the
+              bar is simply replaced by the result or the error on the next
+              frame, rather than flashing a completed state of its own.
+            */}
+            {(() => {
+              const { percent, label } = progress ? describeProgress(progress) : { percent: 0, label: "Starting…" };
+              return (
                 <>
-                  {" · "}
-                  <span
-                    className={
-                      result.spec.valid ? "text-green-700 dark:text-green-500" : "text-amber-700 dark:text-amber-500"
-                    }
-                  >
-                    {result.spec.valid ? "conforms to llmstxt.org" : "does not conform"}
-                  </span>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
+                    <div
+                      className="h-full rounded-full bg-neutral-900 transition-[width] duration-300 ease-out dark:bg-neutral-100"
+                      style={{ width: `${percent}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 text-sm text-neutral-500">{label}</p>
                 </>
-              )}
-            </p>
-            <div className="flex gap-3">
-              {result.saved && signedIn && (
+              );
+            })()}
+          </div>
+        )}
+
+        {!signedIn && (
+          <p className="mt-3 text-sm text-neutral-500">
+            <Link href="/login" className="underline">
+              Sign in
+            </Link>{" "}
+            to generate a new one. Anything already generated is in the{" "}
+            <button type="button" onClick={() => setTab("catalog")} className="underline">
+              catalog
+            </button>
+            .
+          </p>
+        )}
+
+        {error && (
+          <p className="mt-6 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
+            {error}
+          </p>
+        )}
+
+        {result?.partial && (
+          <div className="mt-6 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+            This site was slow enough that time ran out mid-crawl, so this covers{" "}
+            {result.crawl ? `${result.crawl.pages} of ${result.crawl.planned} pages` : "part of the site"} rather than all
+            of it.{" "}
+            {signedIn && (
+              <button type="button" className="underline" onClick={() => void run(result.url, true)}>
+                Try again
+              </button>
+            )}
+          </div>
+        )}
+
+        {result?.source === "published" && (
+          <div className="mt-6 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:bg-blue-950 dark:text-blue-300">
+            This is the site&apos;s own llms.txt, from{" "}
+            <a href={result.publishedAt} className="underline">
+              {result.publishedAt}
+            </a>
+            . Someone there chose what belonged in it.{" "}
+            {signedIn && (
+              <button type="button" className="underline" onClick={() => void run(url, true)}>
+                Generate one anyway
+              </button>
+            )}
+          </div>
+        )}
+
+        {result && (
+          <section className="mt-8">
+            <div className="flex items-center justify-between gap-4">
+              <p className="text-sm text-neutral-500">
+                {result.llmsTxt.length.toLocaleString()} chars
+                {result.crawl && <> · {result.crawl.pages} pages crawled</>}
+                {result.report && <> · {describeReport(result.report)}</>}
+                {result.saved && result.generatedAt && (
+                  <span title={freshnessDetail({ generatedAt: result.generatedAt, lastCheckedAt: result.lastCheckedAt })}>
+                    {" · "}
+                    {result.source === "published" ? "site's own" : "generated"} · refreshed{" "}
+                    {refreshed({ generatedAt: result.generatedAt, lastCheckedAt: result.lastCheckedAt })}
+                  </span>
+                )}
+                {result.stored && <> · saved</>}
+                {result.spec && (
+                  <>
+                    {" · "}
+                    <span
+                      className={
+                        result.spec.valid ? "text-green-700 dark:text-green-500" : "text-amber-700 dark:text-amber-500"
+                      }
+                    >
+                      {result.spec.valid ? "conforms to llmstxt.org" : "does not conform"}
+                    </span>
+                  </>
+                )}
+              </p>
+              <div className="flex gap-3">
+                {result.saved && signedIn && (
+                  <button
+                    onClick={() => void run(result.url, true)}
+                    className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium dark:border-neutral-700"
+                  >
+                    Regenerate
+                  </button>
+                )}
                 <button
-                  onClick={() => void run(result.url, true)}
+                  onClick={download}
                   className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium dark:border-neutral-700"
                 >
-                  Regenerate
+                  Download
                 </button>
-              )}
-              <button
-                onClick={download}
-                className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium dark:border-neutral-700"
-              >
-                Download
-              </button>
+              </div>
             </div>
-          </div>
-          <pre className="mt-3 max-h-[32rem] overflow-auto rounded-lg bg-neutral-50 p-4 font-mono text-xs whitespace-pre-wrap dark:bg-neutral-900">
-            {result.llmsTxt}
-          </pre>
-        </section>
-      )}
+            <pre className="mt-3 max-h-[32rem] overflow-auto rounded-lg bg-neutral-50 p-4 font-mono text-xs whitespace-pre-wrap dark:bg-neutral-900">
+              {result.llmsTxt}
+            </pre>
+          </section>
+        )}
 
-      {saved.length > 0 && (
-        <section className="mt-12">
-          <h2 className="text-sm font-medium text-neutral-500">Already generated</h2>
-          <ul className="mt-3 divide-y divide-neutral-200 dark:divide-neutral-800">
-            {saved.map((site) => (
-              <li key={site.url} className="flex items-center justify-between gap-4 py-2 text-sm">
-                <button type="button" onClick={() => void open(site.url)} className="truncate text-left underline">
-                  {site.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
-                </button>
-                <span className="shrink-0 text-neutral-500" title={freshnessDetail(site)}>
-                  {site.source === "published" ? "site's own" : "generated"} · refreshed {refreshed(site)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      </div>
+
+      <div role="tabpanel" hidden={tab !== "catalog"} className="mt-8">
+        {saved.length === 0 ? (
+          <p className="text-sm text-neutral-500">
+            Nothing has been generated yet. Anything anyone generates shows up here, for everyone.
+          </p>
+        ) : (
+          <>
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Filter by address"
+              aria-label="Filter the catalog by address"
+              className="w-full rounded-lg border border-neutral-300 px-4 py-2.5 outline-none focus:border-neutral-500 dark:border-neutral-700"
+            />
+            <p className="mt-2 text-xs text-neutral-500">
+              {matched.length === saved.length
+                ? `${saved.length} ${saved.length === 1 ? "site" : "sites"}`
+                : `${matched.length} of ${saved.length}`}
+            </p>
+
+            {matched.length === 0 ? (
+              <p className="mt-6 text-sm text-neutral-500">Nothing here matches “{query.trim()}”.</p>
+            ) : (
+              <ul className="mt-3 divide-y divide-neutral-200 dark:divide-neutral-800">
+                {matched.map((site) => (
+                  <li key={site.url} className="flex items-center justify-between gap-4 py-2 text-sm">
+                    <button type="button" onClick={() => void open(site.url)} className="truncate text-left underline">
+                      {displayUrl(site.url)}
+                    </button>
+                    <span className="shrink-0 text-neutral-500" title={freshnessDetail(site)}>
+                      {site.source === "published" ? "site's own" : "generated"} · refreshed {refreshed(site)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
