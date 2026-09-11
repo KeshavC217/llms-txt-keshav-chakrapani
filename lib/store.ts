@@ -67,7 +67,7 @@ const TABLE = "generations";
  * that no longer occurs and hid a real misconfiguration behind a partial row.
  */
 const SELECT_COLUMNS =
-  "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, check_interval_hours, sitemap_hash, source, published_at";
+  "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, sitemap_hash, source, published_at";
 
 const SUMMARY_COLUMNS = "url, generated_at, last_checked_at, changed_at, source";
 
@@ -80,7 +80,6 @@ export interface StoredGeneration {
   structureHash?: string | null;
   lastCheckedAt?: string | null;
   changedAt?: string | null;
-  checkIntervalHours?: number;
   sitemapHash?: string | null;
   /** "generated" - we crawled and wrote it. "published" - the site's own file. */
   source?: string;
@@ -129,7 +128,6 @@ function fromRow(row: any): StoredGeneration {
     structureHash: row.structure_hash,
     lastCheckedAt: row.last_checked_at,
     changedAt: row.changed_at,
-    checkIntervalHours: row.check_interval_hours ?? 24,
     sitemapHash: row.sitemap_hash,
     source: row.source ?? "generated",
     publishedAt: row.published_at,
@@ -196,14 +194,14 @@ export async function generationsToCheck(limit: number): Promise<StoredGeneratio
 
 /**
  * Records the outcome of a check. Written even when nothing changed - that is
- * what moves the row down the queue and widens its interval.
+ * what moves the row down the queue, so the least recently checked site is
+ * always the next one looked at.
  */
 export async function recordCheck(
   url: string,
   update: {
     structureHash: string;
     sitemapHash?: string;
-    checkIntervalHours: number;
     changed: boolean;
     llmsTxt?: string;
   },
@@ -217,7 +215,6 @@ export async function recordCheck(
     .update({
       structure_hash: update.structureHash,
       sitemap_hash: update.sitemapHash ?? null,
-      check_interval_hours: update.checkIntervalHours,
       last_checked_at: now,
       ...(update.changed ? { changed_at: now } : {}),
       // Only replaced when the site moved: an unchanged site keeps the file it

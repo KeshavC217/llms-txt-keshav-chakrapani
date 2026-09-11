@@ -65,7 +65,7 @@ lib/
   nlp.ts                 tokenizing, stemming, overlap, sentence splitting
   ai/                    the guide pass, the annotation pass, and the sieve
   spec.ts                the llmstxt.org grammar: escaping out, parsing back
-  monitor.ts             fingerprints and the per-site check interval
+  monitor.ts             fingerprints and the six-hour check interval
   store.ts               the generations table
 tests/
   fixtures.ts            mock pages, one per genre the extractor meets
@@ -715,12 +715,19 @@ sites are re-checked on a schedule and the ones that moved are rewritten.
 A tier only runs when the one above it was inconclusive. A sitemap that has not moved settles a site
 in about half a second, which is what makes checking hundreds of sites affordable.
 
-**Each site carries its own interval.** It halves when a check finds a change and grows by half when
-it does not, bounded by `MONITOR_MIN_INTERVAL_HOURS` (1) and `MONITOR_MAX_INTERVAL_HOURS` (168). A
-docs site that ships daily converges on being checked daily; a static marketing page drifts out to
-weekly. A row that has never been fingerprinted records its first one as a *baseline* rather than a
-change — otherwise every pre-existing row would halve its interval on the first pass and be watched
-twice as closely for having been there longest.
+**Every site is checked every six hours** (`MONITOR_INTERVAL_HOURS`). One number, the same for all
+of them, so the guarantee can be stated without reading any code: nothing here is ever more than six
+hours behind the site it describes.
+
+Each row used to carry its own interval, halving on a change and growing by half without one, out to
+a weekly ceiling. It adapted the cheap half of the system — a check is usually one request, and the
+expensive half is already gated on evidence that something moved — so what the backoff actually
+bought was up to seven days of a file being wrong about a site that had changed, which is the one
+thing this tool exists not to do. Four checks a day per site is, at four hundred sites, sixteen
+hundred mostly-single-request checks spread across a day; the budget does not notice.
+
+A row that has never been fingerprinted records its first one as a *baseline* rather than a change,
+so a pre-existing row is not reported as having moved the first time it is looked at.
 
 **The loop lives in GitHub Actions, the crawling lives on Vercel.** `.github/workflows/monitor.yml`
 calls `POST /api/refresh` until it reports nothing left due. A serverless function on this plan is
@@ -739,10 +746,13 @@ CRON_SECRET   the same value as the deployment's CRON_SECRET (openssl rand -hex 
 `/api/refresh` compares the bearer token in constant time and answers 401 without one. Run it by
 hand from the Actions tab (`workflow_dispatch`) rather than waiting for the schedule.
 
-**The schedule is a ceiling, not a promise.** The cron reads `2-59/5` - every five minutes, offset
-off the hour because GitHub documents that scheduled events are delayed under load and that "high
-load times include the start of every hour". In practice a low-activity repository sees far fewer:
-this one has been running roughly every four hours. GitHub also disables schedules on repositories
+**The schedule is a ceiling, not a promise.** The cron reads `7,22,37,52` - every fifteen minutes,
+offset off the hour because GitHub documents that scheduled events are delayed under load and that
+"high load times include the start of every hour". This is not how often a site is checked, which is
+the six hours above; it is how precisely a site that has become due gets picked up, and fifteen
+minutes of slack on six hours is four percent. In practice a low-activity repository sees far fewer:
+this one has been running roughly every four hours, which is the real limit on the six-hour
+promise - the interval says when a site *becomes* due, and GitHub decides when anything asks. GitHub also disables schedules on repositories
 with no activity for 60 days, without saying so. Anything that has to be reliable belongs on a real
 scheduler; this is the free one.
 
