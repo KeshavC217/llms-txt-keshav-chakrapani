@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { ALLOW_ALL, isAllowed, parseRobots } from "../lib/crawl/robots.ts";
 import { sitemapCandidates } from "../lib/crawl/sitemap.ts";
 import { canonicalize } from "../lib/crawl/url.ts";
+import { normalizeUrl } from "../lib/fetchPage.ts";
 import { curate, dedupeLinks } from "../lib/grouping.ts";
 import { Pacer } from "../lib/crawl/pacer.ts";
 import { readPage } from "../lib/pageMeta.ts";
@@ -94,6 +95,49 @@ test("one page has one address", () => {
 
 test("a real query parameter is kept, a tracking one is not", () => {
   assert.match(canonicalize("https://x.com/s?q=billing&utm_medium=email", "https://x.com/")!, /\?q=billing$/);
+});
+
+/*
+ * The URL a click on a Google ad produces, copied out of the address bar. The
+ * live table had a row keyed on this, 500 characters of campaign, standing
+ * apart from the site's own home page - which is the cost of getting this
+ * wrong: the same page crawled twice, monitored twice, and found by nobody.
+ */
+const AD_URL =
+  "https://www.tryprofound.com/?vector_id=22613637108&vector_source=GOOGLE&vector_campaign=Global+%7C+Brand+%7C+Core" +
+  "&utm_term=profound&utm_campaign=Global&utm_source=adwords&utm_medium=ppc&hsa_acc=6093232409&hsa_cam=22613637108" +
+  "&hstk_creative=785632321111&gad_source=1&gad_campaignid=22613637108&gbraid=0AAAAA_03Fim&gclid=CjwKCAjwqonVBhA4";
+
+test("an address copied out of an ad is the page it points at", () => {
+  assert.equal(canonicalize(AD_URL, "https://www.tryprofound.com/"), "https://www.tryprofound.com/");
+});
+
+test("a tracking family nobody has heard of is still tracking", () => {
+  // The suffix rule, so a new vendor's prefix does not need adding first.
+  assert.equal(canonicalize("/pricing?acme_campaign=spring&acme_medium=email", "https://x.com/"), "https://x.com/pricing");
+});
+
+test("a query that names a page survives the tracking sweep", () => {
+  for (const href of ["/w/index.php?title=Main_Page", "/search?q=billing", "/posts?page=3", "/item?id=42"]) {
+    assert.ok(canonicalize(href, "https://x.com/")!.includes("?"), href);
+  }
+});
+
+/*
+ * What normalizeUrl returns is the key the file is stored under, so this is
+ * not tidiness: two spellings of one page mean two rows, two crawls and two
+ * schedules, and whichever one a person typed decides which they can find.
+ */
+test("what a person pastes is stored under the page, not the campaign", () => {
+  assert.equal(normalizeUrl(AD_URL), "https://www.tryprofound.com/");
+  assert.equal(normalizeUrl("tryprofound.com/?gclid=abc#pricing"), "https://tryprofound.com/");
+  assert.equal(normalizeUrl(" https://x.com/docs?utm_source=news "), "https://x.com/docs");
+});
+
+test("normalizing an address keeps what identifies the page", () => {
+  assert.equal(normalizeUrl("x.com/search?q=billing"), "https://x.com/search?q=billing");
+  assert.equal(normalizeUrl("ftp://x.com"), null);
+  assert.equal(normalizeUrl("   "), null);
 });
 
 test("assets and other schemes are not pages", () => {

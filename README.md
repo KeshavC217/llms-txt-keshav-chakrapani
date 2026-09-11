@@ -148,7 +148,9 @@ page. Everything here is inferred from structure and word overlap.
   else from the segment itself.
 - **Duplicates.** URLs are canonicalized (fragment, trailing slash, tracking parameters, scheme) and
   titles compared by stemmed token overlap, so "Pricing" and "Our Pricing" collapse to the shorter.
-  One canonicaliser, in `lib/crawl/url.ts` — there were three, and they disagreed.
+  One canonicaliser, in `lib/crawl/url.ts` — there were three, and they disagreed. The address you
+  paste goes through the same list, because it becomes the key the file is stored under: a URL
+  copied out of an ad (`?vector_id=…&gclid=…`) is the site's home page, not a site of its own.
 - **One entry per page.** A query string is usually a variant rather than a page: `airbnb.com`
   linked its gift-card page ten times as `?card_name=arctic`, `&baths`, `&cozy`, and an entire
   section of the file was one page under ten spellings. It cannot simply be dropped, because
