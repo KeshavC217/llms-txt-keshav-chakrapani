@@ -10,8 +10,38 @@
 const NON_PAGE =
   /\.(png|jpe?g|gif|svg|webp|avif|ico|css|js|mjs|json|xml|rss|atom|zip|gz|tgz|pdf|docx?|xlsx?|pptx?|mp[34]|webm|mov|woff2?|ttf|eot)$/i;
 
-/** Query keys that identify the referrer rather than the page. */
-const TRACKING = /^(utm_|ref$|referrer$|fbclid$|gclid$|mc_cid$|mc_eid$|source$)/i;
+/**
+ * Query keys that identify the referrer rather than the page.
+ *
+ * Two shapes, because ad platforms write both. A vendor prefixes its whole
+ * family - `utm_` (Urchin, which everyone inherited), `hsa_`/`hstk_`
+ * (HubSpot), `gad_` (Google Ads), `vector_` (Profound's own campaign tags,
+ * which is where this was noticed) - or it drops a single opaque click id.
+ *
+ * The suffix rule catches the families nobody has heard of yet: a key ending
+ * `_source`, `_medium`, `_campaign`, `_term` or `_content` is a UTM field
+ * wearing a different prefix, whoever minted it.
+ *
+ * What is deliberately not here is anything that could name a page. `?id=`,
+ * `?page=`, `?q=` and `?title=` stay, because dropping one would send us to a
+ * different page than the link pointed at - en.wikipedia.org addresses every
+ * article as /w/index.php?title=X.
+ */
+const TRACKING =
+  /^(utm_|hsa_|hstk_|gad_|vector_|_hs|ref$|referrer$|source$|fbclid$|gclid$|dclid$|gbraid$|wbraid$|msclkid$|twclid$|ttclid$|igshid$|yclid$|epik$|mc_cid$|mc_eid$|s_kwcid$|li_fat_id$|.*_(source|medium|campaign|term|content)$)/i;
+
+/**
+ * Drops the keys above, in place.
+ *
+ * Exported because the address a person pastes needs the same treatment as
+ * one found in a link - it is the same page, and it becomes the key the file
+ * is stored under. See normalizeUrl in lib/fetchPage.ts.
+ */
+export function stripTracking(url: URL): void {
+  for (const key of [...url.searchParams.keys()]) {
+    if (TRACKING.test(key)) url.searchParams.delete(key);
+  }
+}
 
 /**
  * Queries that ask for something to be done to a page, rather than for a page.
@@ -46,10 +76,10 @@ export function canonicalize(href: string, base: string): string | null {
 
   url.hash = "";
   for (const key of [...url.searchParams.keys()]) {
-    if (TRACKING.test(key)) url.searchParams.delete(key);
-    else if (OPERATION_KEY.test(key)) return null;
-    else if (/^action$/i.test(key) && OPERATION_ACTION.test(url.searchParams.get(key) ?? "")) return null;
+    if (OPERATION_KEY.test(key)) return null;
+    if (/^action$/i.test(key) && OPERATION_ACTION.test(url.searchParams.get(key) ?? "")) return null;
   }
+  stripTracking(url);
 
   /*
    * `/docs/index.html` is a directory index and the directory is the better

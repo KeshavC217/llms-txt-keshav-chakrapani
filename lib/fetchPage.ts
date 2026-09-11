@@ -9,6 +9,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
 import { type Block, detectBlock } from "./blocks.ts";
+import { stripTracking } from "./crawl/url.ts";
 import { Deadline } from "./deadline.ts";
 
 export interface FetchedPage {
@@ -42,7 +43,26 @@ const COMMON_HEADERS = {
   "Accept-Language": "en-US,en;q=0.9",
 };
 
-/** Adds https:// when the user omits it, and rejects anything that isn't http(s). */
+/**
+ * Adds https:// when the user omits it, rejects anything that isn't http(s),
+ * and reduces the rest to the page itself.
+ *
+ * This is not cosmetic: what this returns is the key the generated file is
+ * stored under. A URL copied out of an ad carries the campaign that produced
+ * the click - the live table has a row keyed on
+ * `www.tryprofound.com/?vector_id=...&gclid=...`, 500 characters of it,
+ * sitting beside nothing, because that address was stored as though it were a
+ * different site from `www.tryprofound.com/`. It is the same page, it will be
+ * crawled again from scratch, monitored on its own schedule, and never found
+ * by anyone who types the plain address.
+ *
+ * The fragment goes for the same reason - `/#pricing` is one page - and the
+ * tracking keys are dropped by the same list the crawler uses, so an address
+ * pasted in and the same address found in a link reduce to one thing.
+ *
+ * A query that names a page is kept; see the note on TRACKING in
+ * lib/crawl/url.ts for where that line is drawn.
+ */
 export function normalizeUrl(input: string): string | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
@@ -55,7 +75,12 @@ export function normalizeUrl(input: string): string | null {
 
   try {
     const url = new URL(scheme ? trimmed : `https://${trimmed}`);
-    return /^https?:$/.test(url.protocol) && url.hostname ? url.toString() : null;
+    if (!/^https?:$/.test(url.protocol) || !url.hostname) return null;
+
+    url.hash = "";
+    stripTracking(url);
+
+    return url.toString();
   } catch {
     return null;
   }
