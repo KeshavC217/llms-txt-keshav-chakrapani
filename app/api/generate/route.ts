@@ -8,7 +8,7 @@ import { fetchPage, normalizeUrl, USER_AGENT } from "@/lib/fetchPage";
 import { findPublished } from "@/lib/published";
 import { generate } from "@/lib/generate";
 import type { ProgressEvent } from "@/lib/progress";
-import { renderConfigured, renderPage } from "@/lib/render";
+import { describeRenderFailure, renderConfigured, renderPage } from "@/lib/render";
 import { structureHash } from "@/lib/monitor";
 import { authConfigured } from "@/lib/supabase/config";
 import { getUser } from "@/lib/supabase/server";
@@ -151,16 +151,35 @@ export async function POST(request: Request) {
          * adopted only if it found MORE links than the plain fetch did, so
          * trying whenever we found none costs a few seconds at worst.
          */
+        let renderNote: string | undefined;
+
         if (linkCount(seed) === 0 && renderConfigured()) {
           progress({ stage: "rendering" });
-          const rendered = await renderPage(page.url);
-          if (rendered) {
+          const rendered = await renderPage(page.url, deadline);
+
+          if (rendered.ok) {
             const fromBrowser = extract(rendered.html, rendered.url);
             if (linkCount(fromBrowser) > linkCount(seed)) {
               page = { ...page, url: rendered.url, body: rendered.html };
               seed = fromBrowser;
+              renderNote = `rendered (${rendered.waitedFor}): ${linkCount(fromBrowser)} links`;
+            } else {
+              /*
+               * The browser ran and the page is still empty. Not a failure of
+               * this code, and worth saying out loud: it is what a site that
+               * serves nothing to automation looks like from here, and it is
+               * the case that has to be told apart from a timeout.
+               */
+              renderNote = `rendered (${rendered.waitedFor}) but found no links`;
             }
+          } else {
+            renderNote = describeRenderFailure(rendered);
           }
+
+          // The deployment's copy of this is the only place the answer lives:
+          // resy.com renders on a laptop and not here, and until now every way
+          // of failing arrived as the same silence.
+          console.log(`render ${page.url}: ${renderNote}`);
         }
 
         // If the site publishes its own, that is the answer: someone chose
@@ -240,6 +259,10 @@ export async function POST(request: Request) {
           report,
           spec: { valid: issues.length === 0, issues },
           existingLlmsTxt: extraction.existingLlmsTxt,
+          // Only present when a browser was tried, which is only when the
+          // plain fetch found nothing. Travels in the response as well as the
+          // log so the answer does not require access to the deployment.
+          render: renderNote,
         });
       } catch (err) {
         // A safety net rather than a routine path: nothing above should throw

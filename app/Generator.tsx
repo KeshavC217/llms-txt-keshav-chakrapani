@@ -19,6 +19,8 @@ interface Result {
   source?: "published";
   publishedAt?: string;
   crawl?: { pages: number; planned: number; failed: number; partial: boolean };
+  /** Why a browser was needed, and what it got. Absent unless one was tried. */
+  render?: string;
   report?: { notesAccepted: number; sectionsRenamed: number; chunksFailed: number; workerModel: string };
   spec?: { valid: boolean; issues: { line: number; message: string }[] };
 }
@@ -357,6 +359,7 @@ export function Generator({ signedIn, saved }: { signedIn: boolean; saved: Saved
               <p className="text-sm text-neutral-500">
                 {result.llmsTxt.length.toLocaleString()} chars
                 {result.crawl && <> · {result.crawl.pages} pages crawled</>}
+              {result.render && <> · {result.render}</>}
                 {result.report && <> · {describeReport(result.report)}</>}
                 {result.saved && result.generatedAt && (
                   <span title={freshnessDetail({ generatedAt: result.generatedAt, lastCheckedAt: result.lastCheckedAt })}>
