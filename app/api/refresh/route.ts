@@ -9,6 +9,7 @@ import { fetchRobots } from "@/lib/crawl/robots";
 import { generate } from "@/lib/generate";
 import { extract } from "@/lib/naiveExtractor";
 import { generationsToCheck, hashContent, recordCheck, storeConfigured } from "@/lib/store";
+import { Deadline } from "@/lib/deadline";
 import { CHECK_INTERVAL_HOURS, RunBudget, isDue, sitemapHash, structureHash } from "@/lib/monitor";
 
 /**
@@ -82,6 +83,8 @@ export async function POST(request: Request) {
   }
 
   const started = Date.now();
+  // One clock for the run, handed to anything that crawls.
+  const runDeadline = new Deadline(DEADLINE_MS, started);
   const due = (await generationsToCheck(MAX_CHECKS * 2)).filter((row) => isDue(row.lastCheckedAt ?? null));
 
   const checked: Record<string, string>[] = [];
@@ -107,7 +110,7 @@ export async function POST(request: Request) {
             ? // Their file, so the check is to read it again: crawling would
               // produce ours, which is not what this row holds.
               await checkPublished(row.publishedAt ?? row.url, row.contentHash)
-            : await check(row.url, row.structureHash ?? null, row.sitemapHash ?? null, mayRegenerate);
+            : await check(row.url, row.structureHash ?? null, row.sitemapHash ?? null, mayRegenerate, runDeadline);
 
         // Hand back a claim the check did not use.
         if (mayRegenerate && outcome.result !== "changed") budget.release();
@@ -165,6 +168,7 @@ async function check(
   knownStructure: string | null,
   knownSitemap: string | null,
   mayRegenerate: boolean,
+  deadline: Deadline,
 ): Promise<Outcome> {
   const origin = new URL(url).origin;
 
@@ -194,7 +198,17 @@ async function check(
   if (page.block || !page.isHtml) return { result: "skipped", changed: false };
 
   const seed = extract(page.body, page.url);
-  const { extraction, crawl } = await generate(page.body, page.url, { seed });
+  /*
+   * The run's clock, which this never passed.
+   *
+   * A regeneration here has always been bounded only by the crawl's own safety
+   * valve, on the assumption that the valve was smaller than the function. It
+   * was, at 25s inside 60. It is not now, and a check that outran the function
+   * would be killed mid-write - which is the failure the one-clock work exists
+   * to remove from the generate path, and which this path was quietly exempt
+   * from all along.
+   */
+  const { extraction, crawl } = await generate(page.body, page.url, { seed, deadline });
 
   // A crawl cut short by its safety valve is not a fair comparison, and
   // recording it would make the next check compare against a partial site.

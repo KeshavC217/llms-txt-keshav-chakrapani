@@ -52,11 +52,13 @@ test("a nested clock never outlives the one it came from", () => {
 });
 
 test("the request budget leaves the function room to answer", () => {
-  // maxDuration is 60s and the platform kills rather than returns, so the
-  // margin covers a cold start before the handler and serialising a file that
-  // can be tens of kilobytes after it.
-  assert.ok(REQUEST_BUDGET_MS < 60_000, "a budget at the ceiling would still be killed");
-  assert.ok(60_000 - REQUEST_BUDGET_MS >= 5_000, "and the margin has to be worth having");
+  // maxDuration on /api/generate, which the platform enforces by killing
+  // rather than returning. The margin covers a cold start before the handler
+  // and serialising a file that can be tens of kilobytes after it.
+  const CEILING_MS = 300_000;
+
+  assert.ok(REQUEST_BUDGET_MS < CEILING_MS, "a budget at the ceiling would still be killed");
+  assert.ok(CEILING_MS - REQUEST_BUDGET_MS >= 5_000, "and the margin has to be worth having");
 });
 
 test("the caps a step may ask for still add up to more than one request", () => {
@@ -70,10 +72,11 @@ test("the caps a step may ask for still add up to more than one request", () => 
    */
   const caps = {
     seedPage: 10_000,
+    render: 25_000,
     published: 5_000 * 2,
     robots: 4_000,
     sitemap: 8_000,
-    crawl: 20_000,
+    crawl: 60_000,
     models: 35_000,
   };
 

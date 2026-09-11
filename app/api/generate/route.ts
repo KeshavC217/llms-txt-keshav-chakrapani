@@ -46,7 +46,14 @@ import { Deadline, REQUEST_BUDGET_MS } from "@/lib/deadline";
  */
 
 // A crawl and two model passes.
-export const maxDuration = 60;
+/*
+ * The platform's ceiling, not the request's budget - those are different jobs.
+ * REQUEST_BUDGET_MS in lib/deadline.ts is what the handler aims to finish
+ * inside; this is the backstop that ends a request which somehow did not.
+ * Hobby allows 300s with fluid compute, which is where the old 60 came from
+ * and no longer is.
+ */
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   let body: { url?: string; regenerate?: boolean };

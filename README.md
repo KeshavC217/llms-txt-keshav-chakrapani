@@ -460,13 +460,13 @@ description repeated across a fifth of the crawl is dropped, and the home page's
 
 ## Narrating the wait
 
-Generating a site synchronously can take fifty seconds - a crawl, two model passes - and a caller
-watching a spinner for fifty seconds with no idea what it is waiting on reads as broken well before
-it reads as slow.
+Generating a site synchronously takes a minute or more - a render, a crawl, two model passes - and a
+caller watching a spinner for that long with no idea what it is waiting on reads as broken well
+before it reads as slow.
 
 The request stays synchronous: no queue, no worker, no second place a crawl can run. Moving
 crawling to a background job was built in full once - a `status` column, a GitHub Actions worker, a
-dispatch token - and closed unmerged: fifty pages fits the fifty-second budget after "One clock for
+dispatch token - and closed unmerged: fifty pages fits the request budget after "One clock for
 the request" below, so the machinery bought no crawl that could not already be finished, only a
 second place a crawl could happen. What changes here is that the one function doing the work says
 what it is doing, streamed over the same response as it happens, rather than composed after the
@@ -489,7 +489,7 @@ the bar jumps over their share when they do not apply instead of pausing on a st
 Every step had its own timeout and nothing bounded their sum. Each number was defensible alone -
 10s to fetch the page, 5s to look for a published file, 4s for `robots.txt`, 8s for a sitemap, 25s
 of crawling, 35s of models - and together they were roughly twice the sixty seconds a Vercel
-function is allowed.
+function was then allowed.
 
 So on a slow site the platform killed the process partway through, which is the worst of the
 outcomes available:
@@ -532,7 +532,20 @@ wait for a request that is never sent.
 | `en.wikipedia.org` | 21s | 21.2s, complete |
 
 Hacker News gets four pages because it asked to be crawled once every ten seconds and that is what
-fifty seconds buys. Four pages with real notes is a file; a timeout is not.
+the budget buys. Four pages with real notes is a file; a timeout is not.
+
+**The ceiling moved, and the numbers above are from under the old one.** Vercel's Hobby plan allowed
+sixty seconds when all of this was written, which the project recorded as not negotiable; with fluid
+compute it is 300. `/api/generate` now declares 300 and aims to finish inside 150, and the crawl's
+safety valve went from 25s to 60s - which is what had actually been cutting sites short, since the
+request budget was never the binding limit for a crawl that stopped at its own valve first.
+`resy.com` surfaced it at 32 of 35 pages.
+
+`/api/refresh` keeps its sixty, because the loop that drives it lives in a GitHub runner with six
+hours and calls the endpoint until nothing is due - a longer function would buy it nothing. It does
+now pass its clock down to a regeneration, which it never did: that path was bounded only by the
+crawl's valve, on the assumption the valve was the smaller of the two. It was, at 25s inside 60. It
+is not any more.
 
 ### A partial file is stored, without a fingerprint
 
