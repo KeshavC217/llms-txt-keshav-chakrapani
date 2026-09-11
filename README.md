@@ -256,28 +256,41 @@ A caution learned the hard way: Cloudflare leaves its scripts in the pages it pr
 earlier version of the detector read the body alone and refused two working sites. Body markers now
 only count when the status says we were refused.
 
-### One site this does not solve: resy.com
+### The render that never ran
 
-Rendering fixes `docs.convex.dev` everywhere - 0 links from a fetch, 25 in the generated file, on the
-deployment as well as a laptop. `resy.com` is fixed only on a laptop.
+Rendering was believed to work on the deployment and to fail only for `resy.com`, which was recorded
+here for a fortnight as an unexplained gap. It was neither.
 
 | where | result |
 |---|---|
-| laptop, headless Chromium | 222 links |
-| laptop, through the full pipeline | 39 rendered, 42 in the file |
-| the Vercel deployment | **0 links, in about three seconds** |
+| laptop, headless Chromium | resy 222 links, convex 59 |
+| laptop, through the full pipeline | resy 39 rendered, 42 in the file |
+| the Vercel deployment | **0 links, in about three seconds, for every site** |
 
-Three seconds is the finding rather than the zero: a render takes ten or more, so on the deployment
-the browser is not producing anything for this site. Chromium itself is fine there - convex proves
-that on the same deploy - so it is something about resy and that address, most likely its bot
-protection treating a datacentre differently from a residential connection. That has not been
-demonstrated, and it is recorded here as unexplained rather than dressed up.
+Three seconds was the finding rather than the zero - a render takes four or more, so nothing was
+being rendered at all - and the conclusion drawn from it was wrong twice over. It was read as *this
+site* being refused, on the evidence that `docs.convex.dev` was stored with 59 links; but the store
+is shared between a laptop and the deployment and records nothing about which wrote a row, so a row
+generated locally was taken as proof that the deployment could render. It could not, for any site.
 
-One thing that is **not** the explanation, though it looked like it: the `>` line differing between
-runs. That is written by the model, not read from the page, so two runs of the same site produce two
-summaries. It was briefly mistaken for the site serving different content, which it is not.
+What it actually was, once `renderPage` was made to report instead of returning `null`:
 
-Sites that need a browser and are reachable are handled. This one is left as a known gap.
+```
+render https://resy.com/: Cannot find module '/var/task/node_modules/playwright-core/browsers.json'
+```
+
+`serverExternalPackages` stops Next bundling a package. It does not put the package in the function:
+the deployment ships the files its static trace discovered, and neither of these two packages'
+runtime reads are discoverable that way - `playwright-core` opens `browsers.json` by path, and
+`@sparticuz/chromium` reads a compressed browser out of `bin/`. Neither was traced, so Chromium
+never launched, and `catch { return null }` made every attempt look identical to a site that had
+nothing to render. `outputFileTracingIncludes` names the five files explicitly, scoped to
+`/api/generate` so the 66MB browser is not put in the trace of routes that never launch one.
+
+The lesson worth keeping is not about Next's tracing. A capability that reports its failures as
+`null` cannot be debugged from the outside, and the confident diagnosis that filled the silence -
+bot protection, datacentre addresses - was plausible, specific, and about a mechanism that was never
+reached.
 
 ### Known limits
 
