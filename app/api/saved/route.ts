@@ -27,6 +27,7 @@ export async function GET(request: Request) {
       url: saved.url,
       llmsTxt: saved.llmsTxt,
       generatedAt: saved.generatedAt,
+      lastCheckedAt: saved.lastCheckedAt,
       changedAt: saved.changedAt,
       source: saved.source,
       publishedAt: saved.publishedAt,

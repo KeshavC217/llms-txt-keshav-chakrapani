@@ -281,6 +281,39 @@ test("saved returns one file, with where it came from", async () => {
   assert.equal(body.saved, true);
 });
 
+/*
+ * The interface says how current a file is, and that is the last check rather
+ * than the last rewrite - an unchanged site keeps its generatedAt while the
+ * scheduled check keeps confirming it, so the two dates diverge by design and
+ * only one of them answers "is this still right?".
+ */
+test("saved reports when the site was last checked, not only when it was written", async () => {
+  savedRow = {
+    url: "https://example.com/",
+    llmsTxt: "# Example\n",
+    generatedAt: "2026-08-01T00:00:00.000Z",
+    lastCheckedAt: "2026-09-10T00:00:00.000Z",
+    source: "generated",
+  };
+
+  const body = await (await saved(new Request("http://test/api/saved?url=example.com"))).json();
+  assert.equal(body.lastCheckedAt, "2026-09-10T00:00:00.000Z");
+  assert.equal(body.generatedAt, "2026-08-01T00:00:00.000Z");
+});
+
+test("generate's saved short circuit carries the last check too", async () => {
+  currentUser = { id: "u1" };
+  savedRow = {
+    url: "https://example.com/",
+    llmsTxt: "# Example\n",
+    generatedAt: "2026-08-01T00:00:00.000Z",
+    lastCheckedAt: "2026-09-10T00:00:00.000Z",
+  };
+
+  const body = await (await generate(post("/generate", { url: "example.com" }))).json();
+  assert.equal(body.lastCheckedAt, "2026-09-10T00:00:00.000Z");
+});
+
 test("saved rejects a URL it cannot use", async () => {
   const response = await saved(new Request("http://test/api/saved?url=ftp://example.com"));
   assert.equal(response.status, 400);

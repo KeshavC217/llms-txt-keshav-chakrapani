@@ -69,7 +69,7 @@ const TABLE = "generations";
 const SELECT_COLUMNS =
   "url, llms_txt, content_hash, generated_at, structure_hash, last_checked_at, changed_at, check_interval_hours, sitemap_hash, source, published_at";
 
-const SUMMARY_COLUMNS = "url, generated_at, changed_at, source";
+const SUMMARY_COLUMNS = "url, generated_at, last_checked_at, changed_at, source";
 
 export interface StoredGeneration {
   url: string;
@@ -140,7 +140,14 @@ function fromRow(row: any): StoredGeneration {
 /** Everything saved, newest first. Readable by anyone: these describe public pages. */
 export interface SavedSummary {
   url: string;
+  /** When the file itself was last written. */
   generatedAt: string;
+  /**
+   * When the site was last looked at, whether or not it had moved. This is
+   * what "up to date as of" means: an unchanged site keeps its generatedAt
+   * forever, so that date says how old the text is, not how current it is.
+   */
+  lastCheckedAt?: string | null;
   changedAt?: string | null;
   source: string;
 }
@@ -163,6 +170,7 @@ export async function listGenerations(limit = 100): Promise<SavedSummary[]> {
     : (data as any[]).map((row) => ({
         url: row.url,
         generatedAt: row.generated_at,
+        lastCheckedAt: row.last_checked_at ?? null,
         changedAt: row.changed_at ?? null,
         source: row.source ?? "generated",
       }));
