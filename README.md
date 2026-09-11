@@ -11,6 +11,48 @@ obeying `robots.txt` — extracts what each page says about itself, groups the r
 runs two model passes over it, and stores what it produced. A scheduled job re-checks stored sites
 and rewrites the ones that have moved.
 
+## Using it
+
+**Enter a URL.** Anything the browser would accept - `resy.com`, `https://docs.convex.dev/`, or a
+link copied out of an ad, campaign parameters and all. The address is reduced to the page it names
+before anything else happens.
+
+![The generator](docs/screenshots/01-generate.png)
+
+**Generating needs an account; reading does not.** Create one at `/login` - the same form signs up
+and signs in, and any email address with a password of at least eight characters will do. The
+account exists to gate the crawl and the model calls, which cost time and money, rather than to
+protect anything: every file here describes public pages and every one of them is readable, and
+downloadable, by anyone who visits. (If the deployment has Supabase's email confirmation switched
+on, sign-up will ask you to confirm before you can sign in.)
+
+**The catalog is everything anyone has generated**, filterable by address, newest first. Each row
+says whether the file is one this tool wrote or one the site publishes itself, and when the site was
+last checked - not when the file was last written, which for an unchanged site stops moving.
+
+![The catalog](docs/screenshots/02-catalog.png)
+
+Typing filters it as you go, matching the address as displayed - `docs.c` finds `docs.convex.dev`,
+and terms match in any order.
+
+![Filtering the catalog](docs/screenshots/03-catalog-filtered.png)
+
+**Click any row to read its file.** No account, no regeneration - the stored file, with a Download
+button.
+
+![A generated file](docs/screenshots/04-result.png)
+
+**Generating a site that already has a file asks which you meant** - show the saved one, or crawl
+again and write a new one over it. A site that publishes its own `llms.txt` says so instead, and
+offers to generate one anyway.
+
+While a real generation runs, the response is narrated a line at a time: fetching, rendering if the
+page needs a browser, crawling with a page count, then the two model passes. A run takes anywhere
+from a few seconds to a minute and a half depending on the site.
+
+The screenshots above are taken from the live deployment by `node scripts/screenshots.mjs`, so they
+can be retaken rather than re-staged.
+
 ## Setup
 
 ```bash
